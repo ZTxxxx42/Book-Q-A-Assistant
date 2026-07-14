@@ -95,7 +95,9 @@ def _build_rag():
     os.environ.setdefault("NEO4J_URI", settings.neo4j_uri)
     os.environ.setdefault("NEO4J_USERNAME", settings.neo4j_username)
     os.environ.setdefault("NEO4J_PASSWORD", settings.neo4j_password)
-    os.environ.setdefault("MILVUS_URI", settings.milvus_uri)
+    # 注意：不设 MILVUS_URI env —— pymilvus 的 Config 会在 import 时解析该 env，
+    # 文件路径（milvus-lite）会触发 ConnectionConfigException。
+    # LightRAG 的 milvus_impl 在 env 缺省时默认用 working_dir/milvus_lite.db。
 
     from lightrag import LightRAG
 

@@ -21,15 +21,39 @@ _reranker = None
 _reranker_lock = asyncio.Lock()
 
 
+def _cuda_available() -> bool:
+    try:
+        import torch
+
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
+
+def _resolve_model(name: str) -> str:
+    """优先从 ModelScope 下载（国内快且无 HF 元数据头问题），返回本地路径。
+
+    若 ModelScope 不可用则回退到原始名称（交给 FlagEmbedding 走 HuggingFace）。
+    """
+    try:
+        from modelscope import snapshot_download
+
+        local = snapshot_download(name)
+        return local
+    except Exception as e:  # noqa: BLE001
+        print(f"[local_models] ModelScope 下载 {name} 失败，回退 HF: {e}")
+        return name
+
+
 def _get_bge_m3():
     """懒加载 BAAI/bge-m3（FlagEmbedding）。"""
     global _bge_m3
     if _bge_m3 is None:
         from FlagEmbedding import BGEM3FlagModel
 
-        # use_fp16=True 走 GPU 半精度；无 CUDA 自动回退 CPU
+        # use_fp16 仅在有 CUDA 时开启；CPU 上用 fp32
         _bge_m3 = BGEM3FlagModel(
-            settings.embedding_model, use_fp16=True
+            _resolve_model(settings.embedding_model), use_fp16=_cuda_available()
         )
     return _bge_m3
 
@@ -40,7 +64,9 @@ def _get_reranker():
     if _reranker is None:
         from FlagEmbedding import FlagRerank
 
-        _reranker = FlagRerank(settings.rerank_model, use_fp16=True)
+        _reranker = FlagRerank(
+            _resolve_model(settings.rerank_model), use_fp16=_cuda_available()
+        )
     return _reranker
 
 
