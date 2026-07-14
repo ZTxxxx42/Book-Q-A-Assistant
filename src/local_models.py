@@ -35,14 +35,30 @@ def _cuda_available() -> bool:
 
 
 def _resolve_model(name: str) -> str:
-    """优先从 ModelScope 下载（国内快且无 HF 元数据头问题），返回本地路径。
+    """返回模型的本地目录路径。
 
-    若 ModelScope 不可用则回退到原始名称（交给 FlagEmbedding 走 HuggingFace）。
+    解析顺序：
+    1. 扫描项目内缓存目录 model_cache/models/{owner}--{name}/snapshots/{rev}/，
+       命中含 config.json 的快照即返回 —— 零 import、零网络，避开 modelscope
+       在 lightrag/FlagEmbedding 等先加载后 `from modelscope import snapshot_download`
+       偶发失败（__init__ 未绑定 snapshot_download）的问题。
+    2. 本地未命中 → 走 ModelScope 下载（cache_dir=项目内）。
+    3. ModelScope 不可用 → 回退原始名称，交给 FlagEmbedding/CrossEncoder 走 HuggingFace。
     """
+    # 1. 本地缓存快照
+    snap_root = settings.model_cache_dir / "models" / name.replace("/", "--") / "snapshots"
+    if snap_root.exists():
+        for snap in sorted(snap_root.iterdir()):
+            if snap.is_dir() and (snap / "config.json").exists():
+                return str(snap)
+
+    # 2. ModelScope 下载
     try:
         from modelscope import snapshot_download
 
-        local = snapshot_download(name)
+        # 显式 cache_dir=项目内，不依赖 MODELSCOPE_CACHE env 穿透两层 legacy 调用。
+        # 标准布局：{cache_dir}/models/{owner}--{name}/snapshots/{rev}/
+        local = snapshot_download(name, cache_dir=str(settings.model_cache_dir))
         return local
     except Exception as e:  # noqa: BLE001
         print(f"[local_models] ModelScope 下载 {name} 失败，回退 HF: {e}")
@@ -91,7 +107,11 @@ async def _bge_m3_embed(texts: list[str]) -> np.ndarray:
     )
     # encode 返回 dict（含 dense_vecs/sparse_vecs/colbert_vecs）
     dense = out["dense_vecs"]
-    return np.array(dense)
+    # 强转 float32：GPU 上 use_fp16=True 时 dense_vecs 是 float16，
+    # pymilvus 搜索会据此推断 FLOAT16_VECTOR(102) placeholder，
+    # milvus-lite 不支持（仅 101/104/21）→ /query、/chat 搜索报 code=6。
+    # 插入路径按 collection schema(float_vector) 强转不受影响，仅搜索受影响。
+    return np.asarray(dense, dtype=np.float32)
 
 
 def make_bge_m3_embedding_func():

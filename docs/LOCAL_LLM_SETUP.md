@@ -48,11 +48,13 @@ bge-m3 / bge-reranker 跑在 miniforge 的 `my_env`（**不是** 项目根的 `.
 docker pull vllm/vllm-openai:latest
 ```
 
-### A.2 启动 vLLM 容器（GPU + ModelScope 复用宿主缓存）
+### A.2 启动 vLLM 容器（GPU + ModelScope 复用项目内缓存）
+
+模型缓存已集中到项目内 `book_knowledge_graph/model_cache/`（由 `config.model_cache_dir` / `MODELSCOPE_CACHE` 控制，详见 `config.py`）。容器挂载该目录到 `/root/.cache/modelscope` 即可复用 Qwen AWQ。
 
 ```powershell
 docker run -d --gpus all --name book-vllm -p 8001:8000 `
-  -v C:\Users\朱涛\.cache\modelscope:/root/.cache/modelscope `
+  -v D:/PythonProject1/book_knowledge_graph/model_cache:/root/.cache/modelscope `
   -e VLLM_USE_MODELSCOPE=True `
   vllm/vllm-openai:latest `
   --model Qwen/Qwen2.5-7B-Instruct-AWQ `
@@ -171,11 +173,7 @@ LANGUAGE=chinese
 
 ## 7. 本地 embedding/rerank 模型下载
 
-bge-m3 / bge-reranker 在 Windows 原生跑，首次调用自动从 HuggingFace 下载。
-国内加速，在启动 FastAPI 前设环境变量：
-```bash
-export HF_ENDPOINT=https://hf-mirror.com   # Windows PowerShell: $env:HF_ENDPOINT="https://hf-mirror.com"
-```
+bge-m3 / bge-reranker 在 Windows 原生跑，由 `src/local_models._resolve_model` 走 **ModelScope** 下载（HF mirror 元数据头缺失，见坑 2），缓存集中存放在项目内 `book_knowledge_graph/model_cache/models/{owner}--{name}/snapshots/{rev}/`（由 `config.model_cache_dir` + `MODELSCOPE_CACHE` env 控制，HF 回退走 `model_cache/hf/`）。`.gitignore` 已忽略该目录。
 模型约 2.6GB（bge-m3 ~2.2GB + bge-reranker-v2-m3 ~568MB）。
 
 ## 8. 启动验证

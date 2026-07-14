@@ -4,7 +4,9 @@ __pycache__/
 *.pyc
 rag_storage/
 rag_storage_backup/
+model_cache/
 data/books/*
 !data/books/.gitkeep
 *.db
+*.log
 .idea/

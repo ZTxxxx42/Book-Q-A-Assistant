@@ -65,9 +65,24 @@ class Settings:
     chunk_overlap: int = field(default_factory=lambda: int(os.getenv("CHUNK_OVERLAP", "100")))
     language: str = field(default_factory=lambda: os.getenv("LANGUAGE", "chinese"))
 
+    # --- 本地模型缓存（bge-m3 / bge-reranker / Qwen 等，集中存项目内）---
+    # MODEL_CACHE_DIR 可为相对名（相对 PROJECT_ROOT）或绝对路径；默认 model_cache/
+    model_cache_dir: Path = field(
+        default_factory=lambda: PROJECT_ROOT / os.getenv("MODEL_CACHE_DIR", "model_cache")
+    )
+
     def ensure_dirs(self) -> None:
         self.working_dir.mkdir(parents=True, exist_ok=True)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
+
+# 重定向模型下载到项目内（须在任何 modelscope / huggingface_hub import 之前生效）。
+# - MODELSCOPE_CACHE：modelscope Config.cache_dir 的 default_factory 读此 env，
+#   标准布局 {cache}/models/{owner}--{name}/snapshots/{rev}/。
+# - HF_HOME / HUGGINGFACE_HUB_CACHE：_resolve_model 在 modelscope 失败时回退 HF，
+#   让 HF 下载也落在项目内而非 ~/.cache/huggingface。
+os.environ.setdefault("MODELSCOPE_CACHE", str(settings.model_cache_dir))
+os.environ.setdefault("HF_HOME", str(settings.model_cache_dir / "hf"))
+os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(settings.model_cache_dir / "hf"))
