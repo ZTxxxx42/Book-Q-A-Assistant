@@ -1,17 +1,68 @@
-# 本地 LLM 部署：WSL2 + vLLM
+# 本地 LLM 部署：vLLM（Docker 推荐 / WSL2 备选）
 
-本项目问答生成走本地 vLLM（Qwen2.5-7B-Instruct），vLLM 在 Windows 原生不支持，需在 WSL2 内运行。
-bge-m3 / bge-reranker 在 Windows 原生跑，不依赖 WSL2。
+本项目问答生成走本地 vLLM（Qwen2.5-7B-Instruct-AWQ 量化版，适配 RTX 4060 8GB）。
+vLLM 在 Windows 原生不支持，两条路：**Docker Desktop（推荐，已有 WSL2 backend 即可）** 或 WSL2 内 pip 装。
+bge-m3 / bge-reranker 在 Windows 原生 GPU 跑（miniforge `my_env`，Python 3.12 + CUDA torch），不依赖 WSL2。
 
 ## 端口约定
 
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| vLLM（WSL2 内） | 8001 | OpenAI 兼容 API |
+| vLLM（Docker 容器） | 8001 | OpenAI 兼容 API（容器内 8000 → 宿主 8001） |
 | FastAPI | 8010 | 本项目接口（避开 8000 幽灵占用） |
 | Neo4j | 7687 | 已有 |
 
-## 1. 安装 WSL2 + Ubuntu
+## 方案 A（推荐）：Docker 跑 vLLM
+
+前提：Docker Desktop + WSL2 backend 已装（GPU 直通需 Windows 11 + NVIDIA 驱动，已满足）。
+
+### A.1 拉镜像
+
+```powershell
+docker pull vllm/vllm-openai:latest
+```
+
+### A.2 启动 vLLM 容器（GPU + ModelScope 复用宿主缓存）
+
+```powershell
+docker run -d --gpus all --name book-vllm -p 8001:8000 `
+  -v C:\Users\朱涛\.cache\modelscope:/root/.cache/modelscope `
+  -e VLLM_USE_MODELSCOPE=True `
+  vllm/vllm-openai:latest `
+  --model Qwen/Qwen2.5-7B-Instruct-AWQ `
+  --served-model-name Qwen2.5-7B-Instruct `
+  --max-model-len 4096 `
+  --gpu-memory-utilization 0.85 `
+  --quantization awq
+```
+
+- 首次启动自动从 ModelScope 下载 AWQ 模型（~5GB），挂载宿主缓存后续复用。
+- `--gpu-memory-utilization 0.85` 预留 ~1.2GB 给同卡运行的 bge-m3/reranker。
+- 若 7B AWQ 仍 OOM：换 `Qwen/Qwen2.5-3B-Instruct`（去掉 `--quantization awq`，`--max-model-len 8192`）。
+- 看日志：`docker logs -f book-vllm`，出现 `Uvicorn running on http://0.0.0.0:8000` 即就绪。
+
+### A.3 验证
+
+```bash
+curl http://localhost:8001/v1/models   # 应返回 Qwen2.5-7B-Instruct
+```
+
+### A.4 常用运维
+
+```powershell
+docker stop book-vllm      # 停
+docker start book-vllm     # 起（已创建后）
+docker logs -f book-vllm   # 看日志
+docker rm -f book-vllm     # 删除容器
+```
+
+---
+
+## 方案 B（备选）：WSL2 内 pip 装 vLLM
+
+Docker GPU 直通受阻时用此路。
+
+### B.1 安装 WSL2 + Ubuntu
 
 以**管理员**身份开 PowerShell：
 ```powershell
@@ -82,7 +133,9 @@ EMBEDDING_MODEL=BAAI/bge-m3
 EMBEDDING_DIM=1024
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 ENABLE_RERANK=true
-MILVUS_URI=rag_storage/milvus_lite.db
+COSINE_THRESHOLD=1.0
+# 注意：MILVUS_URI 不要写进 .env（pymilvus Config 在 import 时解析会触发 ConnectionConfigException，
+#   由 graph_builder._build_rag 在 import pymilvus 后用 os.environ.setdefault 设置）
 
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USERNAME=neo4j

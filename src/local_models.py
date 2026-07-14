@@ -69,7 +69,9 @@ def _get_reranker():
         from sentence_transformers import CrossEncoder
 
         _reranker = CrossEncoder(
-            _resolve_model(settings.rerank_model), max_length=512
+            _resolve_model(settings.rerank_model),
+            max_length=512,
+            device="cuda" if _cuda_available() else "cpu",
         )
     return _reranker
 
