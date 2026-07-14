@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>书籍知识图谱可视化</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2029; --border: #2a3340;
+    --text: #e4e7eb; --muted: #8b95a5; --accent: #4ea1ff;
+    --accent2: #36cfc9; --danger: #ff7875;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  header {
+    padding: 14px 20px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 17px; font-weight: 600; white-space: nowrap; }
+  header h1 span { color: var(--accent); }
+  .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .controls input, .controls select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 11px; font-size: 13px; outline: none;
+  }
+  .controls input:focus, .controls select:focus { border-color: var(--accent); }
+  .controls input[type="text"] { width: 220px; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 7px 16px; font-size: 13px; cursor: pointer; transition: opacity .15s;
+  }
+  button:hover { opacity: .88; }
+  button.secondary { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
+  button.secondary:hover { border-color: var(--accent); }
+  main { flex: 1; display: flex; overflow: hidden; }
+  #chart { flex: 1; height: 100%; }
+  #side {
+    width: 340px; background: var(--panel); border-left: 1px solid var(--border);
+    padding: 18px; overflow-y: auto; flex-shrink: 0;
+  }
+  #side h2 { font-size: 14px; color: var(--accent2); margin-bottom: 12px; }
+  .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .stat span:last-child { color: var(--text); font-weight: 600; }
+  .node-info { margin-top: 16px; }
+  .node-info .name { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+  .node-info .label { display: inline-block; background: var(--bg); color: var(--accent2); font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-bottom: 10px; }
+  .edge-list { margin-top: 8px; }
+  .edge-item { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; cursor: pointer; }
+  .edge-item:hover { color: var(--accent); }
+  .edge-item .type { color: var(--accent2); }
+  .muted { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+  #query-box {
+    background: var(--panel); border-top: 1px solid var(--border);
+    padding: 12px 20px; display: flex; gap: 10px; align-items: center;
+  }
+  #query-box input { flex: 1; }
+  .badge { background: var(--accent2); color: var(--bg); font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 6px; }
+  .answer { background: var(--bg); border-radius: 6px; padding: 10px 12px; margin-top: 8px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>📚 <span>书籍知识图谱</span></h1>
+    <div class="controls">
+      <input type="text" id="entity-input" placeholder="输入实体名称（模糊）" />
+      <select id="depth">
+        <option value="1">1 跳</option>
+        <option value="2">2 跳</option>
+        <option value="3">3 跳</option>
+      </select>
+      <button id="search-btn">🔍 查找子图</button>
+      <button class="secondary" id="top-btn">热门实体</button>
+      <button class="secondary" id="reset-btn">重置视图</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="chart"></div>
+    <aside id="side">
+      <h2>图谱概览</h2>
+      <div class="stat"><span>节点数</span><span id="stat-nodes">—</span></div>
+      <div class="stat"><span>关系数</span><span id="stat-edges">—</span></div>
+      <div class="stat"><span>总节点(Neo4j)</span><span id="stat-total">—</span></div>
+      <div class="stat"><span>总关系(Neo4j)</span><span id="stat-total-rel">—</span></div>
+      <div class="node-info" id="node-info">
+        <p class="empty">点击节点查看详情<br/>或搜索一个实体开始</p>
+      </div>
+    </aside>
+  </main>
+
+  <div id="query-box">
+    <select id="q-mode">
+      <option value="hybrid">hybrid</option>
+      <option value="local">local</option>
+      <option value="global">global</option>
+      <option value="naive">naive</option>
+    </select>
+    <input type="text" id="q-input" placeholder="基于图谱提问…" />
+    <button id="q-btn">💬 提问</button>
+  </div>
+
+<script>
+const API = ""; // 同源；跨域时填后端地址如 http://localhost:8000
+const chart = echarts.init(document.getElementById("chart"), "dark");
+let currentNodes = [], currentEdges = [];
+
+// 标签 → 颜色
+const PALETTE = ["#4ea1ff","#36cfc9","#ffd666","#ff9c6e","#b37feb","#5cdbd3","#ff85c0","#95de64","#ffc069"];
+function colorFor(label) {
+  let h = 0;
+  for (const c of (label || "ENTITY")) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+}
+
+// 加载子图到画布
+function render(sub) {
+  currentNodes = sub.nodes || [];
+  currentEdges = sub.edges || [];
+  document.getElementById("stat-nodes").textContent = currentNodes.length;
+  document.getElementById("stat-edges").textContent = currentEdges.length;
+
+  const nodes = currentNodes.map(n => ({
+    id: n.id,
+    name: n.name || n.id,
+    symbolSize: Math.min(60, (n.degree || 1) * 4 + 18),
+    itemStyle: { color: colorFor(n.label) },
+    label: { show: true, color: "#e4e7eb", fontSize: 12 },
+    raw: n,
+  }));
+  const links = currentEdges.map(e => ({
+    source: e.source, target: e.target,
+    label: { show: false, formatter: e.type, fontSize: 10, color: "#8b95a5" },
+    lineStyle: { color: "#3a4452", width: 1, curveness: 0.1 },
+    raw: e,
+  }));
+
+  chart.setOption({
+    backgroundColor: "transparent",
+    tooltip: {
+      formatter: p => {
+        if (p.dataType === "edge") {
+          const e = p.data.raw;
+          return `${e.type}<br/><span class="muted">${e.description || ""}</span>`;
+        }
+        const n = p.data.raw;
+        return `<b>${n.name}</b><br/>类型: ${n.label}<br/>度数: ${n.degree}`;
+      }
+    },
+    series: [{
+      type: "graph", layout: "force", roam: true, draggable: true,
+      force: { repulsion: 220, edgeLength: [60, 160], gravity: 0.08 },
+      emphasis: { focus: "adjacency", lineStyle: { width: 3 }, label: { show: true } },
+      edgeSymbol: ["none", "arrow"], edgeSymbolSize: 7,
+      data: nodes, links: links,
+    }]
+  }, true);
+}
+
+// 点击节点 → 显示详情 + 可展开
+chart.on("click", async (p) => {
+  if (p.dataType !== "node") return;
+  const n = p.data.raw;
+  showNodeInfo(n);
+});
+
+function showNodeInfo(n) {
+  const edges = currentEdges.filter(e => e.source === n.id || e.target === n.id);
+  const html = `
+    <div class="name">${n.name}</div>
+    <span class="label">${n.label}</span>
+    <div class="muted">度数: ${n.degree}　关联关系: ${edges.length}</div>
+    <h2 style="margin-top:14px;">关联关系</h2>
+    <div class="edge-list">
+      ${edges.length ? edges.map(e => {
+        const other = e.source === n.id ? e.target : e.source;
+        const otherNode = currentNodes.find(x => x.id === other);
+        const otherName = otherNode ? otherNode.name : other;
+        return `<div class="edge-item" onclick="expandNode('${otherName}')">
+          <span class="type">[${e.type}]</span> → ${otherName}
+          ${e.description ? `<div class="muted">${e.description}</div>` : ""}
+        </div>`;
+      }).join("") : '<p class="empty">无关联</p>'}
+    </div>
+    <button class="secondary" style="margin-top:12px;width:100%;" onclick="expandNode('${n.name.replace(/'/g,"\\'")}')">以「${n.name}」为中心展开</button>
+  `;
+  document.getElementById("node-info").innerHTML = html;
+}
+
+window.expandNode = async function(name) {
+  document.getElementById("entity-input").value = name;
+  await loadSubgraph(name);
+};
+
+async function loadSubgraph(entity, depth) {
+  depth = depth || parseInt(document.getElementById("depth").value);
+  try {
+    const r = await fetch(API + "/graph", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ entity, depth, limit: 100 })
+    });
+    const sub = await r.json();
+    if (!sub.nodes || !sub.nodes.length) {
+      alert("未找到实体：" + entity);
+      return;
+    }
+    render(sub);
+  } catch (e) { alert("查询失败：" + e); }
+}
+
+async function loadTop() {
+  try {
+    const r = await fetch(API + "/graph/top", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ limit: 40 })
+    });
+    const sub = await r.json();
+    if (!sub.nodes || !sub.nodes.length) { alert("图谱为空，请先导入书籍"); return; }
+    // 只展示节点，无边
+    render({ nodes: sub.nodes, edges: [] });
+    document.getElementById("node-info").innerHTML =
+      `<h2>热门实体</h2><p class="muted">点击节点查看关联，或输入名称搜索子图。</p>`;
+  } catch (e) { alert("查询失败：" + e); }
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch(API + "/stats");
+    const s = await r.json();
+    document.getElementById("stat-total").textContent = s.total_nodes;
+    document.getElementById("stat-total-rel").textContent = s.total_relationships;
+  } catch (e) { /* Neo4j 可能未启动 */ }
+}
+
+async function askQuestion() {
+  const q = document.getElementById("q-input").value.trim();
+  if (!q) return;
+  const mode = document.getElementById("q-mode").value;
+  const box = document.getElementById("node-info");
+  box.innerHTML = `<h2>💬 提问</h2><div class="muted">${mode} · ${q}</div><div class="answer" id="ans">思考中…</div>`;
+  try {
+    const r = await fetch(API + "/query", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ question: q, mode })
+    });
+    const data = await r.json();
+    document.getElementById("ans").textContent = data.answer || data.detail || "无回答";
+  } catch (e) {
+    document.getElementById("ans").textContent = "查询失败：" + e;
+  }
+}
+
+// 事件绑定
+document.getElementById("search-btn").onclick = () => {
+  const v = document.getElementById("entity-input").value.trim();
+  if (v) loadSubgraph(v);
+};
+document.getElementById("entity-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") document.getElementById("search-btn").click();
+});
+document.getElementById("top-btn").onclick = loadTop;
+document.getElementById("reset-btn").onclick = () => { chart.clear(); loadTop(); };
+document.getElementById("q-btn").onclick = askQuestion;
+document.getElementById("q-input").addEventListener("keydown", e => {
+  if (e.key === "Enter") askQuestion();
+});
+window.addEventListener("resize", () => chart.resize());
+
+// 初始化
+loadStats();
+loadTop();
+</script>
+</body>
+</html>

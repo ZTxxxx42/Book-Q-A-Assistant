@@ -1,0 +1,22 @@
+lightrag-hku>=1.2.0
+neo4j>=5.20.0
+openai>=1.30.0
+tenacity>=8.2.0
+tiktoken>=0.7.0
+numpy>=1.24.0
+
+# 书籍加载
+pypdf>=4.0.0
+ebooklib>=0.18
+beautifulsoup4>=4.12.0
+markdownify>=0.12.0
+
+# Web API
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+
+# 工具
+python-dotenv>=1.0.0
+click>=8.1.0
+rich>=13.7.0
