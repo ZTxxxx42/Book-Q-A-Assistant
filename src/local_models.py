@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 import numpy as np
@@ -22,6 +23,9 @@ _reranker_lock = asyncio.Lock()
 
 
 def _cuda_available() -> bool:
+    # BGE_FORCE_CPU=1 时强制 CPU（避免与 Ollama/vLLM 共用 GPU 时 CUDA context 冲突）
+    if os.getenv("BGE_FORCE_CPU", "").lower() in ("1", "true", "yes"):
+        return False
     try:
         import torch
 

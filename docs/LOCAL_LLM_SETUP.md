@@ -12,6 +12,21 @@ bge-m3 / bge-reranker 在 Windows 原生 GPU 跑（miniforge `my_env`，Python 3
 | FastAPI | 8010 | 本项目接口（避开 8000 幽灵占用） |
 | Neo4j | 7687 | 已有 |
 
+## bge GPU 环境（miniforge my_env）
+
+bge-m3 / bge-reranker 跑在 miniforge 的 `my_env`（**不是** 项目根的 `.venv`）。
+`.venv` 是 Python 3.14，无 CUDA torch wheel，bge 只能 CPU。
+
+- 环境路径：`D:\miniforge\envs\my_env`（Python 3.12.13 + torch 2.9.1+cu130，`cuda.is_available()=True`）
+- 启动项目一律用：`D:/miniforge/envs/my_env/python.exe -m uvicorn src.api:app --port 8010 --host 127.0.0.1`
+
+### my_env 配置坑（已处理）
+
+1. **conda 包无 dist-info**：`importlib.metadata.version()` 返回 None → transformers/sentence_transformers 版本检测抛 `found=None`。解法：`my_env/Lib/site-packages/sitecustomize.py` 加 `__version__` 回退 patch（环境级，不进项目仓库）。
+2. **torch 2.9 `_dynamo` 缺 optree**：`pip install optree`。
+3. **packaging 被 conda 装坏**：手动删 `site-packages/packaging*` 后 `pip install packaging==25.0` 补 dist-info。
+4. **fastapi/starlette 版本对齐**：`pip install -U fastapi starlette` 到 fastapi 0.139 + starlette 1.x，对齐 sse-starlette 要求（starlette 0.47 移除 `on_startup`，旧 fastapi 会报 `Router.__init__() got unexpected on_startup`）。
+
 ## 方案 A（推荐）：Docker 跑 vLLM
 
 前提：Docker Desktop + WSL2 backend 已装（GPU 直通需 Windows 11 + NVIDIA 驱动，已满足）。
