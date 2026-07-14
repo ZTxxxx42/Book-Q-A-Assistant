@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 rag_storage/
+rag_storage_backup/
 data/books/*
 !data/books/.gitkeep
 *.db
