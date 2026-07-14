@@ -112,4 +112,14 @@ python -m uvicorn src.api:app --port 8010 --host 127.0.0.1
 ## 退路
 
 若 WSL2+vLLM 部署受阻，临时把 `.env` 的 `LLM_BASE_URL` 改回智谱云端、`LLM_MODEL=glm-4-flash`，
-其余链路（Milvus + rerank + 图）照常验证，不阻塞开发。
+其余链路（Milvus + rerank + 图）照常验证，不阻塞开发。当前 demo 即处于此状态：智谱 GLM 流式生成 + 本地 bge embed/rerank + Milvus + Neo4j，全链路验证通过。
+
+## 实测坑（Windows + Python 3.14 + milvus-lite）
+
+1. **CUDA torch 无 3.14 wheel**：`pip install torch --index-url .../cu121` 在 Python 3.14 下 no-op（无匹配 distribution）。bge-m3/reranker 暂跑 CPU（小数据可接受）。需 GPU 加速建议用 Python 3.11/3.12 venv。
+2. **HF mirror 元数据头缺失**：`HF_ENDPOINT=https://hf-mirror.com` 下，新版 `huggingface_hub` 的 HEAD 响应缺 `X-Repo-Commit` 头，报 `FileMetadataError: Distant resource does not seem to be on huggingface.co`。改用 **ModelScope**（`src/local_models._resolve_model` 已自动走 modelscope）。
+3. **pymilvus Config import 解析 MILVUS_URI**：pymilvus 的 legacy `connections` 单例在 `import pymilvus` 时读 `MILVUS_URI` env 并解析，文件路径（milvus-lite）触发 `ConnectionConfigException`。**解法**：先 `import pymilvus`（env 缺省），再设 `MILVUS_URI=文件路径`（milvus_impl 运行时用 `os.environ.get` 读，绕过 Config 单例）。`graph_builder._build_rag` 已如此处理。**不要**把 `MILVUS_URI` 写进 `.env`（会被 pymilvus Config 在 import 时读到）。
+4. **milvus-lite range search radius 语义反转**：milvus-lite 的 range search 保留 `distance <= radius`（L2 语义），但 COSINE 相似度是越大越好。LightRAG 默认 `COSINE_THRESHOLD=0.2` 会过滤掉所有结果（相似度 0.4+ > 0.2 被丢弃）。**解法**：`.env` 设 `COSINE_THRESHOLD=1.0` 等效禁用下限过滤，`top_k` 仍限制数量。
+5. **milvus-lite drop_collection Windows rename 竞态**：`drop_collection` 在 Windows 上 `manifest.json.tmp -> manifest.json` 报 WinError 183。清理时用 `shutil.rmtree(db_dir)` 代替。LightRAG 全新 ingest 不触发 drop，无影响；schema 迁移时可能遇到。
+6. **FlagReranker 与新版 transformers 不兼容**：`FlagEmbedding.FlagReranker.compute_score` 调 `tokenizer.prepare_for_model`（新版 transformers 已移除）。改用 `sentence_transformers.CrossEncoder`（bge-reranker 兼容），sigmoid 归一化分数到 (0,1) 避免 `min_rerank_score=0` 过滤。
+
