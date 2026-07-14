@@ -5,6 +5,15 @@ tenacity>=8.2.0
 tiktoken>=0.7.0
 numpy>=1.24.0
 
+# 向量库：Milvus（milvus-lite 随 pip 安装，单文件 .db，无需 Docker）
+pymilvus>=2.4.0
+
+# 本地 embedding / rerank（bge-m3 + bge-reranker-v2-m3，Windows 原生 GPU）
+FlagEmbedding>=1.2.0
+torch>=2.2.0
+transformers>=4.40.0
+
+
 # 书籍加载
 pypdf>=4.0.0
 ebooklib>=0.18

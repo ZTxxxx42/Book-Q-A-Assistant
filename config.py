@@ -32,7 +32,24 @@ class Settings:
         default_factory=lambda: os.getenv("EMBEDDING_BASE_URL") or None
     )
     embedding_model: str = field(
-        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3")
+    )
+    embedding_dim: int = field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1024")))
+
+    # --- Rerank（本地 bge-reranker）---
+    rerank_model: str = field(
+        default_factory=lambda: os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+    )
+    enable_rerank: bool = field(
+        default_factory=lambda: os.getenv("ENABLE_RERANK", "true").lower() == "true"
+    )
+    llm_streaming: bool = field(
+        default_factory=lambda: os.getenv("LLM_STREAMING", "true").lower() == "true"
+    )
+
+    # --- Milvus 向量库 ---
+    milvus_uri: str = field(
+        default_factory=lambda: os.getenv("MILVUS_URI", "rag_storage/milvus_lite.db")
     )
 
     # --- Neo4j ---

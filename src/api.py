@@ -7,8 +7,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
+import json
+
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -24,7 +26,7 @@ from src.maintenance import (
     list_documents,
     refresh_document,
 )
-from src.query import ask, cypher_query, graph_stats
+from src.query import ask, ask_stream, cypher_query, graph_stats
 
 QueryMode = Literal["local", "global", "hybrid", "naive"]
 
@@ -111,6 +113,41 @@ async def query_endpoint(req: QueryRequest) -> QueryResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败：{e}")
     return QueryResponse(answer=answer, mode=req.mode)
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
+class ChatRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+    mode: QueryMode = Field("hybrid")
+    history: list[ChatMessage] = Field(default_factory=list, description="多轮对话历史")
+
+
+@app.post("/chat")
+async def chat_endpoint(req: ChatRequest):
+    """流式问答（SSE）：逐 token 返回，支持多轮对话历史。
+
+    事件格式：`data: {"type":"token","content":"..."}\\n\\n`
+    结束：`data: {"type":"done"}\\n\\n`；出错：`data: {"type":"error","content":"..."}\\n\\n`
+    """
+    history = [{"role": m.role, "content": m.content} for m in req.history]
+
+    async def event_stream():
+        try:
+            async for chunk in ask_stream(req.question, mode=req.mode, history=history):
+                yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/ingest", response_model=IngestResponse)

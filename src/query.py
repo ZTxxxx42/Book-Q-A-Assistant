@@ -30,6 +30,37 @@ async def ask(
     return await rag.aquery(question, param=param)  # type: ignore[return-value]
 
 
+async def ask_stream(
+    question: str,
+    mode: QueryMode = "hybrid",
+    history: list[dict] | None = None,
+):
+    """流式问答生成器：逐 token 产出答案，并带入多轮对话历史。
+
+    history 为 [{"role":"user"|"assistant","content":"..."}] 格式，
+    交给 LightRAG 的 conversation_history 做上下文连续问答。
+    """
+    from lightrag import QueryParam
+
+    rag = _build_rag()
+    await rag.initialize_storages()
+    param = QueryParam(
+        mode=mode,
+        stream=True,
+        enable_rerank=settings.enable_rerank,
+        conversation_history=history or [],
+    )
+    result = await rag.aquery(question, param=param)
+    # 流式正常返回 AsyncIterator；若 LLM 未走流式分支会退回 str，一次性 yield 兜底
+    if isinstance(result, str):
+        if result:
+            yield result
+        return
+    async for chunk in result:
+        if chunk:
+            yield chunk
+
+
 def cypher_query(cypher: str) -> list[dict]:
     """直接对 Neo4j 执行 Cypher，返回记录列表（只读查询）。"""
     from neo4j import GraphDatabase
