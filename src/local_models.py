@@ -59,13 +59,17 @@ def _get_bge_m3():
 
 
 def _get_reranker():
-    """懒加载 BAAI/bge-reranker-v2-m3（FlagRerank）。"""
+    """懒加载 BAAI/bge-reranker-v2-m3（用 sentence_transformers.CrossEncoder）。
+
+    FlagEmbedding.FlagReranker 在新版 transformers 下 tokenizer 缺 prepare_for_model，
+    故改用 CrossEncoder（bge-reranker 兼容）。
+    """
     global _reranker
     if _reranker is None:
-        from FlagEmbedding import FlagRerank
+        from sentence_transformers import CrossEncoder
 
-        _reranker = FlagRerank(
-            _resolve_model(settings.rerank_model), use_fp16=_cuda_available()
+        _reranker = CrossEncoder(
+            _resolve_model(settings.rerank_model), max_length=512
         )
     return _reranker
 
@@ -104,19 +108,21 @@ async def _bge_rerank(
     top_n: int | None = None,
     **kwargs: Any,
 ) -> list[dict]:
-    """bge-reranker 重排，返回 [{"index","relevance_score"}]（按相关度降序）。"""
+    """bge-reranker 重排，返回 [{"index","relevance_score"}]（按相关度降序）。
+
+    CrossEncoder.predict 返回 logits（可能为负），用 sigmoid 归一化到 (0,1)，
+    避免 LightRAG 的 min_rerank_score(默认 0) 过滤掉负分文档。
+    """
     if not documents:
         return []
     model = await asyncio.to_thread(_get_reranker)
 
     pairs = [(query, doc) for doc in documents]
-    scores = await asyncio.to_thread(lambda: model.compute_score(pairs, normalize=True))
+    logits = await asyncio.to_thread(lambda: model.predict(pairs))
 
-    # compute_score 单条返回 float，多条返回 list
-    if isinstance(scores, (int, float)):
-        scores = [float(scores)]
-    else:
-        scores = [float(s) for s in scores]
+    import math
+
+    scores = [1.0 / (1.0 + math.exp(-float(s))) for s in logits]
 
     ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
     if top_n:

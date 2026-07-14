@@ -53,14 +53,15 @@ async def test_rerank() -> None:
 
 async def test_milvus() -> None:
     header("3. Milvus-lite 连通")
+    import shutil
     from pymilvus import MilvusClient
 
     db = "rag_storage/smoke_milvus.db"
     Path("rag_storage").mkdir(exist_ok=True)
+    # 清理上次残留（milvus-lite drop_collection 在 Windows 有 rename 竞态，直接删目录）
+    shutil.rmtree(db, ignore_errors=True)
     client = MilvusClient(uri=db)
     print(f"Milvus client 创建成功: {db}")
-    if client.has_collection("smoke_test"):
-        client.drop_collection("smoke_test")
     client.create_collection(
         "smoke_test",
         dimension=4,
@@ -71,8 +72,7 @@ async def test_milvus() -> None:
     client.insert("smoke_test", [{"id": i, "vec": [float(i)] * 4, "t": f"row{i}"} for i in range(3)])
     res = client.search("smoke_test", data=[[1.0] * 4], limit=2, output_fields=["t"])
     print(f"搜索结果: {res}")
-    client.drop_collection("smoke_test")
-    os.remove(db)
+    shutil.rmtree(db, ignore_errors=True)
     print("✅ Milvus-lite OK")
 
 

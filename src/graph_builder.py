@@ -95,9 +95,18 @@ def _build_rag():
     os.environ.setdefault("NEO4J_URI", settings.neo4j_uri)
     os.environ.setdefault("NEO4J_USERNAME", settings.neo4j_username)
     os.environ.setdefault("NEO4J_PASSWORD", settings.neo4j_password)
-    # 注意：不设 MILVUS_URI env —— pymilvus 的 Config 会在 import 时解析该 env，
-    # 文件路径（milvus-lite）会触发 ConnectionConfigException。
-    # LightRAG 的 milvus_impl 在 env 缺省时默认用 working_dir/milvus_lite.db。
+
+    # Milvus env 的两难：
+    # - LightRAG check_storage_env_vars 要求 MILVUS_URI / MILVUS_DB_NAME 两个 key 存在
+    # - 但 pymilvus 的 legacy connections 单例在 import 时解析 Config.MILVUS_URI，
+    #   文件路径（milvus-lite）会触发 ConnectionConfigException
+    # 解法：先在 env 缺省时 import pymilvus（单例以空值初始化），再设 env；
+    # milvus_impl 运行时用 os.environ.get 读取（绕过 Config 单例）。
+    import pymilvus  # noqa: F401  —— 触发 connections 单例初始化（env 空，不报错）
+    os.environ.setdefault(
+        "MILVUS_URI", str(settings.working_dir / "milvus_lite.db")
+    )
+    os.environ.setdefault("MILVUS_DB_NAME", "")  # 空串：满足 verify + 跳过 db 操作
 
     from lightrag import LightRAG
 
