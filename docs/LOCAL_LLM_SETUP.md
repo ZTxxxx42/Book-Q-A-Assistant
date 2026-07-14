@@ -26,6 +26,17 @@ bge-m3 / bge-reranker 跑在 miniforge 的 `my_env`（**不是** 项目根的 `.
 2. **torch 2.9 `_dynamo` 缺 optree**：`pip install optree`。
 3. **packaging 被 conda 装坏**：手动删 `site-packages/packaging*` 后 `pip install packaging==25.0` 补 dist-info。
 4. **fastapi/starlette 版本对齐**：`pip install -U fastapi starlette` 到 fastapi 0.139 + starlette 1.x，对齐 sse-starlette 要求（starlette 0.47 移除 `on_startup`，旧 fastapi 会报 `Router.__init__() got unexpected on_startup`）。
+5. **pymilvus 必须 3.0.0**：conda 默认拉 2.5.14，与 milvus-lite 3.0 的 proto 不匹配，向量搜索抛
+   `AttributeError: function_score`（被 LightRAG 捕获后 `aquery` 返回 None → `/chat` SSE 报
+   `'async for' requires __aiter__, got NoneType`）。`pip install --no-deps --ignore-installed pymilvus==3.0.0`
+   与 .venv 对齐。
+6. **numpy 必须 pip 重装 2.5.1**：conda 构建的 numpy 2.5.1 把 MKL/BLAS DLL 放在
+   `my_env/Library/bin`（`libblas.dll`/`mkl_*.dll`/`libiomp5md.dll`），直接调 `python.exe`（未 `conda activate`）
+   时 `Library/bin` 不在 PATH → numpy 延迟加载 BLAS DLL 失败 → 大矩阵 matmul 触发
+   `Windows fatal exception: code 0xc06d007f`（小矩阵不走 BLAS 故节点搜索能过、边搜索崩溃，日志停在 `Query edges`）。
+   `pip install --no-deps --ignore-installed numpy==2.5.1`（PyPI 同版本，ABI 不变；pip wheel 自带
+   `scipy-openblas` 打包在 numpy 包内，自包含）。验证：`numpy.show_config()` 的 `blas.name` 应为
+   `scipy-openblas`（非 `blas`/MKL）；`np.random.rand(512,1024)@np.random.rand(1024,64)` 不崩。
 
 ## 方案 A（推荐）：Docker 跑 vLLM
 
