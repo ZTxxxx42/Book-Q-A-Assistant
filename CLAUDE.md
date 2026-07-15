@@ -2,57 +2,58 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## What this is
+## 项目是什么
 
-Book → Knowledge Graph: ingest a whole book (PDF/TXT/EPUB/MD/DOCX), use **LightRAG** to extract entities/relations via an LLM, store the graph in **Neo4j**, vectors in **Qdrant** (Docker container), and serve a hybrid-retrieval QA API (FastAPI + SSE streaming). **Each book is an independent knowledge graph** — LightRAG `workspace` = book basename isolates Neo4j label, Qdrant `workspace_id`, and KV subdirectory. No cross-book merging; no cross-book query. **SiliconFlow** API provides bge-m3 embedding + bge-reranker-v2-m3 rerank. LLMs are **split by role** (LightRAG `role_llm_configs`): entity/keyword **extraction** → remote **GLM-4.7** (heavy work, keeps the local GPU free); final **answer generation** → local **Ollama** Qwen2.5-7B-Instruct (OpenAI-compatible, short streamed responses only).
+书籍 → 知识图谱：导入一整本书（PDF/TXT/EPUB/MD/DOCX），用 **LightRAG** 借 LLM 抽取实体/关系，图谱存 **Neo4j**、向量存 **Qdrant**（Docker 容器），对外提供混合检索问答 API（FastAPI + SSE 流式）。**每本书是一个独立知识图谱** —— LightRAG `workspace` = 书的 basename，借此隔离 Neo4j label、Qdrant `workspace_id` 与 KV 子目录。不做跨书合并，不支持跨书查询。**SiliconFlow** API 提供 bge-m3 嵌入 + bge-reranker-v2-m3 重排。LLM **按角色拆分**（LightRAG `role_llm_configs`）：实体/关键词**抽取** → 远程 **GLM-4.7**（重活，让本地 GPU 空出来）；最终**答复生成** → 本地 **Ollama** Qwen2.5-7B-Instruct（OpenAI 兼容，只做短答复流式生成）。
 
-> Why per-book workspaces: a "book knowledge graph" is naturally one-graph-per-book; merged graphs crossed entity boundaries confusingly. `workspace=basename` gives true isolation (independent Neo4j labels, clean per-book delete, native per-book hybrid retrieval instead of a chunk-filter hack). Cross-book query was dropped as out of scope.
+> 为什么按书隔离 workspace："书籍知识图谱"天然是一书一图；合并图谱会混淆实体边界。`workspace=basename` 给出真隔离（独立 Neo4j label、干净的单书删除、原生单书混合检索，而非 chunk-filter 取巧）。跨书查询作为超范围功能已弃用。
 
-> Migration note: the stack previously used local bge-m3/reranker + milvus-lite + remote GLM, then NanoVectorDB, then a merged Qdrant graph with a chunk-filter per-book hack. Now: API embed/rerank + Qdrant + GLM-extract / Ollama-answer + per-book workspaces. See `docs/TROUBLESHOOTING.md` for the iteration history.
+> 迁移说明：技术栈此前用过 本地 bge-m3/reranker + milvus-lite + 远程 GLM，再 NanoVectorDB，再 合并 Qdrant 图 + chunk-filter 单书取巧。现为：API 嵌入/重排 + Qdrant + GLM 抽取 / Ollama 答复 + 单书 workspace。完整迭代史见 `docs/TROUBLESHOOTING.md`。
 
-## Commands
+## 命令
 
-Run everything from `book_knowledge_graph/`. Use the miniforge `my_env` interpreter:
+所有命令在 `book_knowledge_graph/` 下执行，用 miniforge `my_env` 解释器：
 
 ```bash
-# Prerequisites: Ollama running + Qwen pulled, Neo4j + Qdrant up
+# 前置：Ollama 运行中 + 已 pull Qwen，Neo4j + Qdrant 已起
 ollama pull qwen2.5:7b-instruct
-# Ollama default port 11434 is in a Windows reserved range → use 21434
+# Ollama 默认端口 11434 落在 Windows 保留端口段 → 改用 21434
 $env:OLLAMA_HOST="127.0.0.1:21434"   # PowerShell
-ollama serve                       # leave running (OpenAI API at http://localhost:21434/v1)
+ollama serve                       # 保持运行（OpenAI API 在 http://localhost:21434/v1）
 docker compose up -d               # Neo4j + Qdrant
 
-# FastAPI server (port 8010, not 8000 — 8000 is "ghost-occupied" on this machine)
+# FastAPI 服务（端口 8010，不是 8000 —— 8000 在本机被"幽灵占用"）
 D:/miniforge/envs/my_env/python.exe -m uvicorn src.api:app --port 8010 --host 127.0.0.1
+# 或：D:/miniforge/envs/my_env/python.exe serve.py（带统一日志 dictConfig）
 
 # CLI
 D:/miniforge/envs/my_env/python.exe main.py ingest --file alice_en.txt [--max-chunks N]
-D:/miniforge/envs/my_env/python.exe main.py query  --question "..." --mode hybrid
-D:/miniforge/envs/my_env/python.exe main.py stats
+D:/miniforge/envs/my_env/python.exe main.py query  --question "..." --mode hybrid --book alice_en.txt
+D:/miniforge/envs/my_env/python.exe main.py stats [--book alice_en.txt]
 D:/miniforge/envs/my_env/python.exe main.py cypher -c "MATCH (n) RETURN labels(n), count(*)"
 
-# Scripts
-D:/miniforge/envs/my_env/python.exe scripts/smoke_remote_models.py  # smoke: SiliconFlow embed/rerank + Qdrant + Ollama + LightRAG build
-D:/miniforge/envs/my_env/python.exe scripts/check_model.py           # verify the .env LLM endpoint responds
-D:/miniforge/envs/my_env/python.exe scripts/e2e_test.py              # ingest alice_en.txt (max 15 chunks) + stream a query
+# 脚本
+D:/miniforge/envs/my_env/python.exe scripts/smoke_remote_models.py  # 冒烟：SiliconFlow 嵌入/重排 + Qdrant + Ollama + LightRAG 构建
+D:/miniforge/envs/my_env/python.exe scripts/check_model.py           # 验证 .env 的 LLM 端点可达
+D:/miniforge/envs/my_env/python.exe scripts/e2e_test.py              # 导入 alice_en.txt（max 15 chunks）+ 流式查询
 ```
 
-There is **no pytest suite** — verification is the smoke script plus hitting the running API:
+**没有 pytest 套件** —— 验证靠冒烟脚本 + 直连运行中的 API：
 ```bash
 curl http://localhost:8010/health
 curl -N -X POST http://localhost:8010/chat -H "Content-Type: application/json" \
-  -d '{"question":"Who is the main character?","mode":"hybrid"}'
+  -d '{"question":"Who is the main character?","book":"alice_en.txt","mode":"hybrid"}'
 ```
 
-Query modes: `local` (specific entity/fact), `global` (cross-chapter), `hybrid` (default, recommended), `naive` (plain vector RAG, no graph).
+查询模式：`local`（具体实体/事实）、`global`（跨章节）、`hybrid`（默认，推荐）、`naive`（纯向量 RAG，不走图）。
 
-**Per-book independent graphs**: every API that touches the graph takes a required `book` (filename = workspace): `/query`, `/chat`, `/graph`, `/graph/top`, `/stats?book=`, `/documents/{book}` (GET/DELETE), `/documents/{book}/refresh`, entity/relation edit endpoints (`?book=`). CLI: `query --book`, `stats --book`. Each book's entities/relations/chunks live in their own Neo4j label + Qdrant workspace_id + `working_dir/<book>/` KV subdir. Cross-book query is not supported by design.
+**按书独立图谱**：所有触图的 API 都带必填 `book`（文件名 = workspace）：`/query`、`/chat`、`/graph`、`/graph/top`、`/stats?book=`、`/documents/{book}`（GET/DELETE）、`/documents/{book}/refresh`、实体/关系编辑端点（`?book=`）。CLI：`query --book`、`stats --book`。每本书的实体/关系/chunk 各自住在独立 Neo4j label + Qdrant workspace_id + `working_dir/<book>/` KV 子目录。跨书查询设计上不支持。
 
-**Document upsert**: `POST /documents/upsert` handles same-basename re-ingest — deletes the existing workspace then re-ingests.
+**文档 upsert**：`POST /documents/upsert` 处理同 basename 重新导入 —— 先删该 workspace 再重新导入。
 
-## Architecture
+## 架构
 
-The data flow is linear and lives in `src/`:
+数据流是线性的，代码在 `src/`：
 
 ```
 loader.py ──load_book/split_into_chunks──▶ graph_builder._build_rag() ──▶ LightRAG
@@ -62,56 +63,57 @@ loader.py ──load_book/split_into_chunks──▶ graph_builder._build_rag() 
                                               ▼
                                     query.ask / ask_stream / cypher_query
                                               │
-                              api.py (FastAPI) ── /query /chat /ingest /stats /graph /documents /entities /relations /cypher
+                              api.py (FastAPI) ── /query /chat /ingest /stats /graph /documents /entities /relations /cypher /config
 ```
 
-- `config.py` — single `Settings` dataclass; values resolve via **env > `config.yaml` > code default** (the `_cfg()` helper). Secrets (`*_api_key`/`neo4j_password`/`qdrant_api_key`) are env-only and never written to YAML. `config.yaml` is gitignored (local override); `config.example.yaml` is the commented template. `settings` is a singleton built at import time → **any change needs a process restart** (the config UI returns `needs_restart: true` accordingly). `settings.ensure_dirs()` creates `working_dir` + `data/books` + `log_dir`. `NO_PROXY=localhost,127.0.0.1` is force-injected at import (see below).
-- `src/loader.py` — format-specific readers (`_read_pdf`/`_read_epub`/`_read_docx`/`_read_plain`) → `_normalize` → `split_into_chunks` (char-based, Chinese-friendly, no tokenizer dependency). `_read_docx` serializes paragraphs + table rows (tab-separated). `resolve_book_path` maps a bare filename to `data/books/`.
-- `src/graph_builder.py` — **the integration core**. `_build_rag()` constructs the `LightRAG` instance with `Neo4JStorage` + `QdrantVectorDBStorage` + SiliconFlow embed/rerank funcs. It injects `QDRANT_URL`/`NO_PROXY` into the process env (LightRAG's internal `QdrantClient` reads them). LLM is split via `role_llm_configs={"query": ...}`: base `llm_model_func` = `_make_glm_func()` (GLM-4.7, used for `extract`/`keyword` roles), `query` role overridden with `_make_qwen_func()` (local Ollama Qwen, final answer). `_make_llm_func(api_key, base_url, model, streaming_enabled)` is the shared factory; it branches on `kwargs["stream"]` — streaming requests return an async generator (so LightRAG detects `is_streaming=True`), non-streaming (entity extraction) return a full string. `ingest_book()` loads, chunks, joins, and calls `rag.ainsert(full_text, file_paths=[fname])`.
-- `src/remote_models.py` — `make_embedding_func()` wraps SiliconFlow `/v1/embeddings` (OpenAI-compatible, AsyncOpenAI) into a LightRAG `EmbeddingFunc` (returns float32 ndarray). `make_reranker_func()` calls SiliconFlow `/v1/rerank` (httpx, non-OpenAI) and returns `[{index, relevance_score}]` with sigmoid fallback for out-of-range scores. Both have tenacity retry on 429/5xx.
-- `src/query.py` — `ask` (non-stream), `ask_stream` (async generator, multi-turn `conversation_history`), `cypher_query` (raw read-only Neo4j), `graph_stats`. **Query rewrite (A3)**: `_prepare_question` returns `(probe_q, retrieve_q)`; `_rewrite_query` resolves pronouns via GLM (only when history is non-empty, falls back to the raw question on any failure), `_decompose_query` splits multi-part questions (JSON parsed by `_extract_json_array`, which strips markdown fences + regex-extracts `[...]`), `_pick_gen_query` probes both candidates and picks the one with more hits so decomposition can only help, never hurt. **Hard refuse (A1)**: probes with `aquery_data(only_need_context)` (no LLM); refs < `MIN_HIT_COUNT` → `HARD_REFUSE_ANSWER`, SSE `{"type":"refuse"}`.
-- `src/maintenance.py` — thin wrappers over LightRAG 1.5.x maintenance API (`aedit_entity`/`adelete_by_doc_id`/`aedit_relation`…); these sync vector store + Neo4j automatically. Each helper calls `_rag()` which builds + `initialize_storages()` a fresh LightRAG per call.
-- `src/graph_view.py` — `get_subgraph`/`get_top_entities` for the frontend viz. Knows the Neo4j storage convention: node label = workspace name, entity name in `entity_id` property, edge type is `DIRECTED` with semantics in `description`/`weight`.
-- `src/api.py` — FastAPI app. `/chat` is SSE streaming with a **heartbeat** (`stream_heartbeat_interval`; a background producer drains the generator into a queue and the main loop `wait_for`s the queue, never the generator's `__anext__`) and **queue visibility** (emits `{"type":"queue","ahead":N}` when another query is in flight; the `_query_in_flight` counter is incremented + yielded inside `try/finally` so a client disconnect can't leak it or trigger a 503 cascade). CORS via `cors_origins` (a wildcard origin auto-disables `Allow-Credentials`). `/ingest/async` + `/tasks/{id}` track long ingests in an in-process `_tasks` dict (no DB — lost on restart). `/cypher` allowlists only `MATCH/RETURN/WITH/CALL/UNWIND` prefixes. **`GET /config`** returns a grouped snapshot (secrets masked `***`); **`PUT /config`** writes non-secret fields back to `config.yaml` (skips secrets + unknown fields); both return `needs_restart: true`.
-- `src/logging_config.py` — `build_log_config(level, log_file)` returns a `dictConfig`: `RotatingFileHandler` → `<log_dir>/app.log` (10MB × 5 backups) + a console `StreamHandler`, `book_kg.*` namespace at the configured level, third-party libs (httpx/openai/httpcore/uvicorn.access) at WARNING. `serve.py` passes it as uvicorn `log_config`; `main.py` CLI calls `setup_logging()`. Level via `LOG_LEVEL` (env or `config.yaml`).
-- `main.py` — Click CLI mirroring the API surface.
-- `static/index.html` — served at `/`, the graph viz UI. Single-file (ECharts + vanilla JS, no build). Four sidebar tabs: **概览** (stats + clickable type legend from `node_counts_by_label` + node detail with description), **文档管理** (`/documents` list + `/ingest` + `/documents/upsert` + refresh + delete), **Cypher** (`/cypher` console with result table), **配置** (`GET /config` grouped form, secrets read-only `***`, save → `PUT /config` writes `config.yaml` + toast "需重启生效"; tab loads lazily on switch). Chat area has a book-scope dropdown (`/chat` with `book`), references rendered under each answer, toast replaces alert.
+- `config.py` —— 单一 `Settings` dataclass；取值优先级 **环境变量 > `config.yaml` > 代码默认**（`_cfg()` 辅助函数）。敏感项（`*_api_key`/`neo4j_password`/`qdrant_api_key`）只走环境变量，绝不写入 YAML。`config.yaml` 被 gitignore（本地覆盖）；`config.example.yaml` 是带注释的模板。`settings` 是 import 时构造的单例 → **任何改动都需重启进程才生效**（配置 UI 据此返回 `needs_restart: true`）。`settings.ensure_dirs()` 创建 `working_dir` + `data/books` + `log_dir`。`NO_PROXY=localhost,127.0.0.1` 在 import 时强制注入（见下）。
+- `src/loader.py` —— 按格式读取（`_read_pdf`/`_read_epub`/`_read_docx`/`_read_plain`）→ `_normalize` → `split_into_chunks`（按字符切，中文友好，不依赖 tokenizer）。`_read_docx` 把段落 + 表格行（制表符分隔）序列化。`resolve_book_path` 把裸文件名映射到 `data/books/`。
+- `src/graph_builder.py` —— **集成核心**。`_build_rag()` 构造 `LightRAG` 实例，配 `Neo4JStorage` + `QdrantVectorDBStorage` + SiliconFlow 嵌入/重排函数。它把 `QDRANT_URL`/`NO_PROXY` 注入进程环境（LightRAG 内部的 `QdrantClient` 读它们）。LLM 经 `role_llm_configs={"query": ...}` 拆角色：基座 `llm_model_func` = `_make_glm_func()`（GLM-4.7，用于 `extract`/`keyword` 角色），`query` 角色覆写为 `_make_qwen_func()`（本地 Ollama Qwen，最终答复）。`_make_llm_func(api_key, base_url, model, streaming_enabled)` 是共享工厂；按 `kwargs["stream"]` 分支 —— 流式请求返回异步生成器（让 LightRAG 识别 `is_streaming=True`），非流式（实体抽取）返回完整字符串。`ingest_book()` 加载、切块、拼接，调 `rag.ainsert(full_text, file_paths=[fname])`。
+- `src/remote_models.py` —— `make_embedding_func()` 把 SiliconFlow `/v1/embeddings`（OpenAI 兼容，AsyncOpenAI）包成 LightRAG `EmbeddingFunc`（返回 float32 ndarray）。`make_reranker_func()` 调 SiliconFlow `/v1/rerank`（httpx，非 OpenAI），返回 `[{index, relevance_score}]`，对越界分数做 sigmoid 兜底。两者都对 429/5xx 做 tenacity 重试。
+- `src/query.py` —— `ask`（非流式）、`ask_stream`（异步生成器，多轮 `conversation_history`）、`cypher_query`（只读原生 Neo4j）、`graph_stats`。**查询改写（A3）**：`_prepare_question` 返回 `(probe_q, retrieve_q)`；`_rewrite_query` 用 GLM 消解指代（仅当历史非空，任何失败回退原问题），`_decompose_query` 拆分多部分问题（JSON 由 `_extract_json_array` 解析，先剥 markdown fence 再正则提 `[...]`），`_pick_gen_query` 探测两个候选、取命中数多者，使分解只能帮忙不会添乱。**硬拒答（A1）**：先用 `aquery_data(only_need_context)` 探测（不调 LLM）；引用 < `MIN_HIT_COUNT` → 返回 `HARD_REFUSE_ANSWER`，SSE 发 `{"type":"refuse"}`。
+- `src/maintenance.py` —— LightRAG 1.5.x 维护 API（`aedit_entity`/`adelete_by_doc_id`/`aedit_relation`…）的薄封装；这些会自动同步向量库 + Neo4j。每个 helper 调 `_rag()` 从池取实例（只读/轻写）；重写操作走 `_rag_exclusive()` 独占 build + init + finalize。
+- `src/rag_pool.py` —— `RagPool` 按 workspace LRU 缓存 LightRAG 实例（淘汰时 `finalize_storages` 关连接）。`query`/`maintenance._rag` 用池；`ingest_book`/`delete_document` 独占构建 + finalize + `invalidate` 池中条目。lifespan 启停池。
+- `src/graph_view.py` —— `get_subgraph`/`get_top_entities` 供前端可视化。知道 Neo4j 存储约定：节点 label = workspace 名，实体名在 `entity_id` 属性，边类型为 `DIRECTED`，语义在 `description`/`weight`。
+- `src/api.py` —— FastAPI 应用。`/chat` 是 SSE 流式，带**心跳**（`stream_heartbeat_interval`；后台生产者把生成器排空入 queue，主循环 `wait_for` queue、绝不 `wait_for` 生成器的 `__anext__`）与**排队可见化**（有查询在跑时发 `{"type":"queue","ahead":N}`；`_query_in_flight` 计数器的自增 + yield 全在 `try/finally` 内，客户端断开也不会泄漏或触发 503 雪崩）。CORS 走 `cors_origins`（通配源自动关 `Allow-Credentials`）。`/ingest/async` + `/tasks/{id}` 用进程内 `_tasks` dict 跟踪长导入（无 DB —— 重启即丢）。`/cypher` 仅允许 `MATCH/RETURN/WITH/CALL/UNWIND` 前缀。**`GET /config`** 返回分组快照（敏感项掩码 `***`）；**`PUT /config`** 把非敏感字段写回 `config.yaml`（跳过敏感 + 未知字段）；两者都返回 `needs_restart: true`。
+- `src/logging_config.py` —— `build_log_config(level, log_file)` 返回 `dictConfig`：`RotatingFileHandler` → `<log_dir>/app.log`（10MB × 5 备份）+ 控制台 `StreamHandler`，`book_kg.*` 命名空间按配置级别，第三方库（httpx/openai/httpcore/uvicorn.access）压到 WARNING。`serve.py` 把它作为 uvicorn `log_config` 传入；`main.py` CLI 调 `setup_logging()`。级别由 `LOG_LEVEL` 控制（env 或 `config.yaml`）。
+- `main.py` —— Click CLI，镜像 API 能力。
+- `static/index.html` —— 挂在 `/` 的图谱可视化 UI。单文件（ECharts + 原生 JS，无构建）。四个侧栏 tab：**概览**（统计 + 可点类型图例来自 `node_counts_by_label` + 节点详情含描述）、**文档管理**（`/documents` 列表 + `/ingest` + `/documents/upsert` + 刷新 + 删除）、**Cypher**（`/cypher` 控制台带结果表）、**配置**（`GET /config` 分组表单，敏感项只读 `***`，保存 → `PUT /config` 写 `config.yaml` + toast "需重启生效"；tab 切换时懒加载）。聊天区有书域下拉（`/chat` 带 `book`），引用渲染在每条答复下，toast 替代 alert。
 
-## Critical environment notes
+## 关键环境说明
 
-See `docs/TROUBLESHOOTING.md` for the full iteration log. The non-obvious ones:
+完整迭代日志见 `docs/TROUBLESHOOTING.md`。以下是反直觉的点：
 
-1. **`COSINE_THRESHOLD=0.2`** — LightRAG reads it → `cosine_better_than_threshold` → Qdrant's `score_threshold`. Qdrant `Distance.COSINE` returns **true cosine similarity** (verified: identical=1.0, orthogonal=0.0, range [-1,1]) and keeps `score >= threshold`. So `0.2` is a sensible floor. (Unrelated to the old milvus-lite `1.0` hack — that's gone.)
-2. **Qdrant port is `16333`, not the default `6333`** — `6333`/`6334` fall in a Windows Hyper-V reserved port range and Docker bind fails. The compose maps host `16333/16334` → container `6333/6334`. `QDRANT_URL=http://localhost:16333`.
-3. **`NO_PROXY=localhost,127.0.0.1` is force-set in `config.py`** — a system proxy (FlClash/Clash) is active on this machine; without the bypass, `qdrant-client`'s `requests` routes localhost through the proxy and Qdrant returns `502 Bad Gateway`. `config.py` injects this at import time so every entry point is covered (LightRAG builds its `QdrantClient` internally without `trust_env=False`).
-4. **Neo4j Community edition** can't create named databases, so LightRAG's `chunk-entity-relation` DB request logs "not found... Fallback to use the default database" — harmless, falls back to `neo4j` default DB.
-5. **Ollama concurrency**: default `OLLAMA_NUM_PARALLEL=1`, so `QUERY_LLM_MODEL_MAX_ASYNC=1`. Raising it requires starting Ollama with `OLLAMA_NUM_PARALLEL=N` and enough VRAM for N concurrent Qwen contexts.
-6. **Local Qwen is answer-only**: do NOT route `extract`/`keyword` roles to the local Qwen — long extraction generation crashes this 30W laptop GPU (see TROUBLESHOOTING). Extraction stays on remote GLM.
-7. **Production hardening (phase 5)** — query fault-tolerance + concurrency:
-   - **Hard refuse (A1)**: `query.ask`/`ask_stream` probe with `rag.aquery_data` (only_need_context, **no LLM call**) first; if references < `MIN_HIT_COUNT` → return `HARD_REFUSE_ANSWER` without touching Ollama. Post-check: empty refs/content after `aquery_llm` → also refuse. SSE emits `{"type":"refuse"}`.
-   - **LLM robustness (A2)**: `_make_llm_func` has `timeout` (GLM 60s / Qwen 120s) + retries 429 (6×) and connection/timeout errors (3×) + empty-response raises `EmptyLLMResponseError` + stream first-token timeout. `/query` overall timeout 180s → 504.
-   - **Instance pool (B0)**: `src/rag_pool.py` `RagPool` caches LightRAG per workspace (LRU, `finalize_storages` on evict). `query`/`maintenance._rag` use the pool; `ingest_book`/`delete_document` build exclusive + finalize + `invalidate` the pool entry. Lifespan starts/shuts the pool.
-   - **Global concurrency gate (B1)**: `lifespan` calls `initialize_share_data(global_concurrency_limits={llm:extract:2, llm:keyword:2, llm:query:1, embedding:4, rerank:4})` once — makes LightRAG's per-instance `max_async` semaphores participate in a cross-instance global limit (zero source patch). `llm:query=1` serializes Ollama across requests.
-   - **Rate limit (B2)**: `Semaphore(MAX_CONCURRENT_REQUESTS=8)` non-blocking → 503 + Retry-After; ingest `Semaphore(1)`. Input validation: `book` regex whitelist + `max_length` + `_ensure_book_exists` precheck; errors desensitized via `_safe_detail`.
-   - **Async ingest (B3)**: `/documents/upsert` and `/documents/{book}/refresh` return `task_id` immediately; `_submit_ingest_task` holds `_task_ref` (anti-GC) + TTL cleanup; frontend `pollTask` polls `/tasks/{id}`.
-   - **Query rewrite/decompose (A3, phase 6)**: `_prepare_question` → `(probe_q, retrieve_q)`; GLM rewrites pronouns from history, decomposes multi-part questions, `_pick_gen_query` picks whichever candidate yields more hits. Rewrite LLM is attached to the `llm:extract` global concurrency group (not `llm:query`), so it never contends with Ollama.
-   - **SSE hardening (A4, phase 6)**: heartbeat via background-producer + queue (never `wait_for` on the generator); CORS via `cors_origins` (wildcard auto-disables credentials).
-   - **Queue visibility (B4, phase 6)**: `/chat` emits `{"type":"queue","ahead":N}` when a query is waiting; the in-flight counter lives in `try/finally` so disconnects reset cleanly (no 503 cascade). Scope: `/chat` streaming only, not `/query`.
-8. **SiliconFlow rerank score range**: code assumes `relevance_score ∈ [0,1]` but sigmoid-normalizes anything outside (raw logit fallback). Verified in [0,1] via smoke.
-9. **GLM 429**: `LLM_MODEL_MAX_ASYNC=2` + 6-retry backoff. If 429 persists, drop to 1.
+1. **`COSINE_THRESHOLD=0.2`** —— LightRAG 读它 → `cosine_better_than_threshold` → Qdrant 的 `score_threshold`。Qdrant `Distance.COSINE` 返回**真余弦相似度**（已验证：相同=1.0、正交=0.0、范围 [-1,1]），保留 `score >= threshold`。所以 `0.2` 是合理下限。（与旧 milvus-lite 的 `1.0` hack 无关 —— 那个已删。）
+2. **Qdrant 端口是 `16333`，不是默认 `6333`** —— `6333`/`6334` 落在 Windows Hyper-V 保留端口段，Docker bind 失败。compose 把宿主 `16333/16334` → 容器 `6333/6334`。`QDRANT_URL=http://localhost:16333`。
+3. **`NO_PROXY=localhost,127.0.0.1` 在 `config.py` 强制注入** —— 本机有系统代理（FlClash/Clash）；不绕过的话 `qdrant-client` 的 `requests` 会把 localhost 走代理，Qdrant 返回 `502 Bad Gateway`。`config.py` 在 import 时注入，覆盖所有入口（LightRAG 内部建 `QdrantClient` 时没传 `trust_env=False`）。
+4. **Neo4j Community 版**不能建命名数据库，故 LightRAG 请求 `chunk-entity-relation` DB 时会日志 "not found... Fallback to use the default database" —— 无害，回退到 `neo4j` 默认库。
+5. **Ollama 并发**：默认 `OLLAMA_NUM_PARALLEL=1`，故 `QUERY_LLM_MODEL_MAX_ASYNC=1`。要调高需以 `OLLAMA_NUM_PARALLEL=N` 启动 Ollama 且显存够 N 个并发 Qwen 上下文。
+6. **本地 Qwen 只做答复**：别把 `extract`/`keyword` 角色路由到本地 Qwen —— 长抽取生成会拖崩这个 30W 笔记本 GPU（见 TROUBLESHOOTING）。抽取留在远程 GLM。
+7. **生产硬化（phase 5/6）** —— 查询容错 + 并发：
+   - **硬拒答（A1）**：`query.ask`/`ask_stream` 先用 `rag.aquery_data`（only_need_context，**不调 LLM**）探测；引用 < `MIN_HIT_COUNT` → 不碰 Ollama 直接返回 `HARD_REFUSE_ANSWER`。后置检查：`aquery_llm` 后引用/内容为空也拒答。SSE 发 `{"type":"refuse"}`。
+   - **LLM 鲁棒性（A2）**：`_make_llm_func` 带 `timeout`（GLM 60s / Qwen 120s）+ 429 重试 6 次 + 连接/超时错误重试 3 次 + 空响应抛 `EmptyLLMResponseError` + 流式首 token 超时。`/query` 整体超时 180s → 504。
+   - **实例池（B0）**：`src/rag_pool.py` `RagPool` 按 workspace 缓存 LightRAG（LRU，淘汰时 `finalize_storages`）。`query`/`maintenance._rag` 用池；`ingest_book`/`delete_document` 独占构建 + finalize + `invalidate` 池条目。lifespan 启停池。
+   - **全局并发闸（B1）**：`lifespan` 调一次 `initialize_share_data(global_concurrency_limits={llm:extract:2, llm:keyword:2, llm:query:1, embedding:4, rerank:4})` —— 让 LightRAG 每实例的 `max_async` 信号量参与跨实例全局限额（零源码改动）。`llm:query=1` 跨请求串行化 Ollama。
+   - **限流（B2）**：`Semaphore(MAX_CONCURRENT_REQUESTS=8)` 非阻塞 → 503 + Retry-After；ingest `Semaphore(1)`。输入校验：`book` 正则白名单 + `max_length` + `_ensure_book_exists` 预检；错误经 `_safe_detail` 脱敏。
+   - **异步导入（B3）**：`/documents/upsert` 和 `/documents/{book}/refresh` 立即返回 `task_id`；`_submit_ingest_task` 持 `_task_ref`（防 GC）+ TTL 清理；前端 `pollTask` 轮询 `/tasks/{id}`。
+   - **查询改写/分解（A3，phase 6）**：`_prepare_question` → `(probe_q, retrieve_q)`；GLM 按历史消解指代、拆分多部分问题，`_pick_gen_query` 取命中多者。改写 LLM 挂在 `llm:extract` 全局并发组（非 `llm:query`），不与 Ollama 抢槽。
+   - **SSE 硬化（A4，phase 6）**：心跳走 后台生产者 + queue（绝不 `wait_for` 生成器）；CORS 走 `cors_origins`（通配源自动关 credentials）。
+   - **排队可见化（B4，phase 6）**：`/chat` 在有查询等待时发 `{"type":"queue","ahead":N}`；在飞计数器在 `try/finally` 内，断开干净归零（无 503 雪崩）。范围：仅 `/chat` 流式，不含 `/query`。
+8. **SiliconFlow 重排分数范围**：代码假定 `relevance_score ∈ [0,1]`，对越界值做 sigmoid 归一（原始 logit 兜底）。已冒烟验证在 [0,1]。
+9. **GLM 429**：`LLM_MODEL_MAX_ASYNC=2` + 6 次退避重试。若 429 持续，降到 1。
 
-## Ports
+## 端口
 
-| Service | Port |
+| 服务 | 端口 |
 |---------|------|
-| Ollama (OpenAI API) | 21434 (default 11434 is in a Windows reserved range) |
+| Ollama（OpenAI API） | 21434（默认 11434 在 Windows 保留端口段） |
 | FastAPI | 8010 |
 | Neo4j Bolt / Browser | 7687 / 7474 |
 | Qdrant HTTP / gRPC | 16333 / 16334 |
 
-## Re-ingesting
+## 重新导入
 
-Each book is isolated in its own workspace, so re-importing one book doesn't touch others:
-- **Update one book**: `POST /documents/{book}/refresh` or `POST /documents/upsert` (deletes that book's workspace, then re-ingests).
-- **Delete one book**: `DELETE /documents/{book}` — removes its Neo4j label nodes, Qdrant workspace_id points, and `working_dir/<book>/` KV subdir.
-- **Full wipe** (all books): drop Qdrant collections + `MATCH (n) DETACH DELETE n` in Neo4j + `rm -rf rag_storage/*`, then re-ingest each book.
+每本书隔离在各自 workspace，重导一本不影响其它：
+- **更新一本书**：`POST /documents/{book}/refresh` 或 `POST /documents/upsert`（删该书 workspace，再重导）。
+- **删除一本书**：`DELETE /documents/{book}` —— 删其 Neo4j label 节点、Qdrant workspace_id 点、`working_dir/<book>/` KV 子目录。
+- **全量清空**（所有书）：drop Qdrant collections + Neo4j 里 `MATCH (n) DETACH DELETE n` + `rm -rf rag_storage/*`，再逐本重导。
