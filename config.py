@@ -187,3 +187,106 @@ class Settings:
 
 
 settings = Settings()
+
+
+# ---------- 配置 UI 辅助（7B）----------
+
+# 敏感字段：UI 以 *** 只读展示，PUT 不接受其更新（继续走 .env）。
+_SECRET_FIELDS = {
+    "llm_api_key",
+    "query_llm_api_key",
+    "embedding_api_key",
+    "rerank_api_key",
+    "qdrant_api_key",
+    "neo4j_password",
+}
+
+# 按 12 分组组织字段（label, [field_names]），用于配置 UI 渲染。
+CONFIG_GROUPS: list[tuple[str, list[str]]] = [
+    ("LLM 抽取（GLM-4.7）", ["llm_binding", "llm_api_key", "llm_base_url", "llm_model", "llm_streaming", "llm_model_max_async"]),
+    ("Query LLM 答复（Ollama Qwen）", ["query_llm_api_key", "query_llm_base_url", "query_llm_model", "query_llm_streaming", "query_llm_model_max_async"]),
+    ("Embedding（bge-m3）", ["embedding_binding", "embedding_api_key", "embedding_base_url", "embedding_model", "embedding_dim"]),
+    ("Rerank（bge-reranker）", ["rerank_model", "rerank_api_key", "rerank_base_url", "enable_rerank"]),
+    ("向量库 Qdrant", ["qdrant_url", "qdrant_api_key"]),
+    ("Neo4j", ["neo4j_uri", "neo4j_username", "neo4j_password"]),
+    ("存储 / 分块", ["working_dir", "chunk_size", "chunk_overlap", "language"]),
+    ("查询 / 检索质量", ["top_k", "chunk_top_k", "min_rerank_score", "include_references", "response_type"]),
+    ("Query 容错护栏（A1）", ["min_hit_count", "hard_refuse_threshold", "hard_refuse_answer"]),
+    ("LLM 鲁棒性 + SSE/CORS（A2/A4）", ["llm_timeout", "query_llm_timeout", "stream_first_token_timeout", "stream_heartbeat_interval", "cors_origins"]),
+    ("日志", ["log_level", "log_dir"]),
+    ("输入校验（A0）", ["max_question_length", "max_book_name_length", "max_history_turns"]),
+    ("并发硬化（B0/B1/B2）", ["rag_pool_size", "global_extract_concurrency", "global_keyword_concurrency", "global_query_concurrency", "global_embedding_concurrency", "global_rerank_concurrency", "max_concurrent_requests", "max_concurrent_ingest", "query_overall_timeout", "task_ttl"]),
+]
+
+# 字段名 → 类型 cast（按当前 settings 值推断；bool 必须在 int 前判断）。
+def _cast_for(name: str):
+    v = getattr(settings, name)
+    if isinstance(v, bool):
+        return bool
+    if isinstance(v, int):
+        return int
+    if isinstance(v, float):
+        return float
+    return str  # str / Path / None
+
+
+def get_config_snapshot() -> dict:
+    """返回分组配置快照：{groups: [{label, fields: [{name, value, is_secret, type}]}], needs_restart: true}。
+
+    敏感字段 value 固定 ``"***"``。Path 字段转字符串展示。
+    """
+    groups = []
+    for label, names in CONFIG_GROUPS:
+        fields = []
+        for name in names:
+            is_secret = name in _SECRET_FIELDS
+            if is_secret:
+                value = "***"
+            else:
+                v = getattr(settings, name)
+                value = str(v) if isinstance(v, Path) else ("" if v is None else v)
+            fields.append({"name": name, "value": value, "is_secret": is_secret, "type": _cast_for(name).__name__})
+        groups.append({"label": label, "fields": fields})
+    return {"groups": groups, "needs_restart": True}
+
+
+def save_config_updates(updates: dict) -> dict:
+    """把非敏感字段更新写回 config.yaml（合并已有内容）。
+
+    - 跳过未知字段与敏感字段；
+    - 按字段类型 cast 新值（bool/int/float/str），空串 + 默认 None 的字段存 None（YAML 省略）；
+    - 返回 ``{saved: [字段名], skipped: [字段名], needs_restart: true}``。
+    """
+    valid_names = {n for _, names in CONFIG_GROUPS for n in names}
+    saved, skipped = [], []
+    # 读现有 config.yaml（若有）
+    existing: dict = _load_yaml()
+    for name, raw in updates.items():
+        if name not in valid_names or name in _SECRET_FIELDS:
+            skipped.append(name)
+            continue
+        cast = _cast_for(name)
+        try:
+            if cast is bool:
+                val = str(raw).strip().lower() == "true"
+            elif cast is int:
+                val = int(raw)
+            elif cast is float:
+                val = float(raw)
+            else:
+                val = str(raw)
+                # 当前值为 None 的字段（base_url 等）传空串 → 存 None（YAML 省略键）
+                if val == "" and getattr(settings, name) is None:
+                    val = None
+        except (ValueError, TypeError):
+            skipped.append(name)
+            continue
+        if val is None:
+            existing.pop(name, None)
+        else:
+            existing[name] = val
+        saved.append(name)
+    with _CONFIG_YAML.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(existing, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    return {"saved": saved, "skipped": skipped, "needs_restart": True}
+

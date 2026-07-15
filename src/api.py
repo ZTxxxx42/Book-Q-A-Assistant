@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from config import settings
+from config import get_config_snapshot, save_config_updates, settings
 from src.graph_builder import ingest_book
 from src.graph_view import get_subgraph, get_top_entities
 from src.maintenance import (
@@ -506,6 +506,23 @@ async def stats_endpoint(book: str | None = None) -> StatsResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=_safe_detail("统计失败", e))
     return StatsResponse(**info)
+
+
+@app.get("/config")
+async def config_endpoint() -> dict:
+    """返回分组配置快照（敏感字段 *** 只读）。改动需重启生效。"""
+    return get_config_snapshot()
+
+
+@app.put("/config")
+async def update_config_endpoint(updates: dict) -> dict:
+    """更新非敏感配置字段并写回 config.yaml。敏感字段忽略，返回 needs_restart=true。"""
+    if not isinstance(updates, dict) or not updates:
+        raise HTTPException(status_code=422, detail="请求体需为非空 JSON 对象")
+    try:
+        return save_config_updates(updates)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_detail("配置保存失败", e))
 
 
 class GraphRequest(BaseModel):

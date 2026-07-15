@@ -144,6 +144,7 @@
         <div class="tab active" data-tab="overview">图谱概览</div>
         <div class="tab" data-tab="docs">文档管理</div>
         <div class="tab" data-tab="cypher">Cypher</div>
+        <div class="tab" data-tab="config">配置</div>
       </div>
 
       <div class="tab-pane active" id="pane-overview">
@@ -179,6 +180,16 @@
           <span class="muted" id="cypher-status" style="margin-left:8px;"></span>
         </div>
         <div id="cypher-result"></div>
+      </div>
+
+      <div class="tab-pane" id="pane-config">
+        <h2>配置</h2>
+        <div class="muted" style="margin-bottom:10px;">敏感项（***）只读，走 .env。改值保存后需重启服务生效。</div>
+        <div id="config-form"></div>
+        <div style="margin-top:12px;">
+          <button class="sm" id="config-save">💾 保存</button>
+          <span class="muted" id="config-status" style="margin-left:8px;"></span>
+        </div>
       </div>
     </aside>
   </main>
@@ -600,6 +611,79 @@ document.getElementById("book-select").onchange = onBookChange;
 // 导入/删除后刷新书籍列表
 async function refreshBooksAndGraph() { await loadDocs(); }
 
+// ===== 配置面板（7B）=====
+async function loadConfig() {
+  const form = document.getElementById("config-form");
+  document.getElementById("config-status").textContent = "";
+  try {
+    const r = await fetch(API + "/config");
+    if (!r.ok) { const e = await r.json(); toast(e.detail || "加载配置失败", "error"); return; }
+    const data = await r.json();
+    form.innerHTML = "";
+    for (const g of data.groups) {
+      const sect = document.createElement("div");
+      sect.style.marginBottom = "14px";
+      const h = document.createElement("div");
+      h.className = "muted";
+      h.style.fontSize = "12px";
+      h.style.marginBottom = "4px";
+      h.textContent = g.label;
+      sect.appendChild(h);
+      for (const f of g.fields) {
+        const row = document.createElement("div");
+        row.style.display = "flex";
+        row.style.alignItems = "center";
+        row.style.gap = "8px";
+        row.style.marginBottom = "6px";
+        const lbl = document.createElement("label");
+        lbl.textContent = f.name;
+        lbl.style.flex = "0 0 180px";
+        lbl.style.fontSize = "12px";
+        lbl.style.fontFamily = "monospace";
+        const inp = document.createElement("input");
+        inp.type = (f.type === "bool") ? "text" : "text";
+        inp.value = (f.value === null || f.value === undefined) ? "" : String(f.value);
+        inp.dataset.field = f.name;
+        inp.dataset.type = f.type;
+        inp.style.flex = "1";
+        inp.style.background = "var(--bg)";
+        inp.style.color = "var(--text)";
+        inp.style.border = "1px solid var(--border)";
+        inp.style.borderRadius = "6px";
+        inp.style.padding = "5px 9px";
+        inp.style.fontSize = "12px";
+        if (f.is_secret) { inp.disabled = true; inp.style.opacity = "0.6"; }
+        if (f.type === "bool") inp.placeholder = "true / false";
+        row.appendChild(lbl);
+        row.appendChild(inp);
+        sect.appendChild(row);
+      }
+      form.appendChild(sect);
+    }
+  } catch (e) { toast("加载配置失败", "error"); }
+}
+async function saveConfig() {
+  const inputs = document.querySelectorAll("#config-form input");
+  const updates = {};
+  inputs.forEach(inp => {
+    if (inp.disabled) return;  // 跳过敏感只读字段
+    updates[inp.dataset.field] = inp.value;
+  });
+  document.getElementById("config-status").textContent = "保存中…";
+  try {
+    const r = await fetch(API + "/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    if (!r.ok) { const e = await r.json(); toast(e.detail || "保存失败", "error"); document.getElementById("config-status").textContent = ""; return; }
+    const data = await r.json();
+    document.getElementById("config-status").textContent = "";
+    toast(`已保存 ${data.saved.length} 项，需重启服务生效`, "ok");
+  } catch (e) { toast("保存失败", "error"); document.getElementById("config-status").textContent = ""; }
+}
+document.getElementById("config-save").onclick = saveConfig;
+
 // tab 切换
 document.querySelectorAll(".tab").forEach(t => {
   t.onclick = () => {
@@ -608,6 +692,7 @@ document.querySelectorAll(".tab").forEach(t => {
     t.classList.add("active");
     document.getElementById("pane-" + t.dataset.tab).classList.add("active");
     if (t.dataset.tab === "docs") loadDocs();
+    if (t.dataset.tab === "config") loadConfig();
   };
 });
 
