@@ -8,7 +8,7 @@ embedding 与 rerank 走 **SiliconFlow（硅基流动）** API，不占用本地
 
 | 服务 | 端口 |
 |------|------|
-| Ollama（OpenAI 兼容 API） | 11434 |
+| Ollama（OpenAI 兼容 API） | 21434（默认 11434 在 Windows 保留段） |
 | FastAPI | 8010 |
 | Neo4j Bolt / Browser | 7687 / 7474 |
 | Qdrant HTTP / gRPC | 16333 / 16334 |
@@ -21,9 +21,11 @@ embedding 与 rerank 走 **SiliconFlow（硅基流动）** API，不占用本地
 
 ```powershell
 ollama pull qwen2.5:7b-instruct    # ~4.7GB，RTX 4060 8GB 足够
-ollama serve                       # 后台常驻，OpenAI API 在 http://localhost:11434/v1
+# 注意：默认端口 11434 落在 Windows Hyper-V 保留段，改用 21434
+$env:OLLAMA_HOST="127.0.0.1:21434"
+ollama serve                       # 后台常驻，OpenAI API 在 http://localhost:21434/v1
 # 验证：
-curl http://localhost:11434/v1/models
+curl http://localhost:21434/v1/models
 ```
 
 - Ollama 自动用 GPU 推理（CPU 回退）。

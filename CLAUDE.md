@@ -15,7 +15,9 @@ Run everything from `book_knowledge_graph/`. Use the miniforge `my_env` interpre
 ```bash
 # Prerequisites: Ollama running + Qwen pulled, Neo4j + Qdrant up
 ollama pull qwen2.5:7b-instruct
-ollama serve                       # leave running (OpenAI API at http://localhost:11434/v1)
+# Ollama default port 11434 is in a Windows reserved range → use 21434
+$env:OLLAMA_HOST="127.0.0.1:21434"   # PowerShell
+ollama serve                       # leave running (OpenAI API at http://localhost:21434/v1)
 docker compose up -d               # Neo4j + Qdrant
 
 # FastAPI server (port 8010, not 8000 — 8000 is "ghost-occupied" on this machine)
@@ -83,7 +85,7 @@ See `docs/TROUBLESHOOTING.md` for the full iteration log. The non-obvious ones:
 
 | Service | Port |
 |---------|------|
-| Ollama (OpenAI API) | 11434 |
+| Ollama (OpenAI API) | 21434 (default 11434 is in a Windows reserved range) |
 | FastAPI | 8010 |
 | Neo4j Bolt / Browser | 7687 / 7474 |
 | Qdrant HTTP / gRPC | 16333 / 16334 |

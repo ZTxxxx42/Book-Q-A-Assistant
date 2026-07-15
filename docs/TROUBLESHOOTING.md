@@ -5,8 +5,8 @@
 
 ## Open risks / to-verify
 
-- **SiliconFlow `/v1/rerank` 响应格式**：`documents` 是否接受纯字符串数组、`relevance_score` 是否已在 [0,1]。实施时先 curl 一次确认；`src/remote_models.py` 已做范围校验 + sigmoid 兜底。
-- **SiliconFlow `/v1/embeddings` 批量上限**：`EMBEDDING_BATCH_NUM=32` 若被拒（400，retry 不捕获）则下调。
+- **SiliconFlow `/v1/rerank` 响应格式** ✅ 已验证：`documents` 接受纯字符串数组，返回 `results:[{index, document:null, relevance_score}]`，score 已在 [0,1]（实测 0.212 / 0.0000166），sigmoid 兜底未触发。
+- **SiliconFlow `/v1/embeddings`** ✅ 已验证：1024 维，OpenAI 兼容。批量上限 `EMBEDDING_BATCH_NUM=32` 待 ingest 实测，若被拒（400）则下调。
 - **Ollama 并发**：`LLM_MODEL_MAX_ASYNC=1` 先跑通；调 2 需 `OLLAMA_NUM_PARALLEL=2` 且 8GB 显存够 2 路 Qwen-7B 上下文。
 - **网络延迟**：每次 query 多 2 个 SiliconFlow RTT（~100-300ms），demo 可接受。
 
@@ -17,6 +17,12 @@
 - **Root cause:** Windows Hyper-V 动态端口保留段含 6248-6347，6333/6334 都在其中。`netsh interface ipv4 show excludedportrange protocol=tcp` 可查。
 - **Fix:** compose 端口映射改为宿主 `16333:6333` / `16334:6334`；`QDRANT_URL=http://localhost:16333`；`config.py` 默认值同步。
 - **Files:** `docker-compose.yml`、`.env.example`、`config.py`。
+
+### 2026-07-15 — Ollama 默认端口 11434 同样在 Windows 保留段
+- **Symptom:** `ollama serve` 报 `listen tcp 127.0.0.1:11434: bind: ... forbidden by its access permissions`。
+- **Root cause:** 11434 落在保留段 11417-11516。
+- **Fix:** 启动前设 `OLLAMA_HOST=127.0.0.1:21434`；`.env` `LLM_BASE_URL=http://localhost:21434/v1`。本机其他保留段避坑：6248-6847、8526-8625、10101-11616、28385/28390。
+- **Files:** `.env`、`.env.example`、`CLAUDE.md`、`docs/LOCAL_LLM_SETUP.md`。
 
 ### 2026-07-15 — qdrant-client 连本地 Qdrant 返回 502 Bad Gateway
 - **Symptom:** `QdrantClient(url='http://localhost:16333').get_collections()` 抛 `UnexpectedResponse: 502 Bad Gateway`，但 `curl http://localhost:16333/collections` 正常返回 200。
