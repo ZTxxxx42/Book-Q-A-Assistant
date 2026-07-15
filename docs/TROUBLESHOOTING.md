@@ -11,6 +11,26 @@
 - **本地 Qwen 答复稳定性**：query 角色单次答复几百 token，远短于引发崩溃的 8 分钟抽取；若 SSE 异常则改非流式或换 3b。
 - **网络延迟**：每次 query 多 2 个 SiliconFlow RTT（~100-300ms），demo 可接受。
 
+## Resolved（当前轮：阶段 1 查询/检索质量优化）
+
+### 2026-07-15 — /query 非流式 enable_rerank 与 /chat 不对称
+- **Symptom:** `ask()`（/query + CLI）构造 `QueryParam` 未传 `enable_rerank`，读 LightRAG 自身 `RERANK_BY_DEFAULT` env，与项目 `.env` 的 `ENABLE_RERANK` 脱节；`ask_stream()`（/chat）则正确读 `settings.enable_rerank`。两者当前都 true 未暴露，但设置不一致。
+- **Root cause:** 两个函数分别手写 `QueryParam`，非流式分支漏传。
+- **Fix:** 抽 `_make_param()` 统一显式传 `enable_rerank=settings.enable_rerank` 及所有检索旋钮。
+- **Files:** `src/query.py`。
+
+### 2026-07-15 — rerank 形同不过滤（MIN_RERANK_SCORE=0.0）
+- **Symptom:** rerank 开启但低相关 chunk 仍进上下文，无关问题（如 weather）会被拼凑答复。
+- **Root cause:** LightRAG `MIN_RERANK_SCORE` 默认 0.0，rerank 只排序不设门槛。
+- **Fix:** `.env` 设 `MIN_RERANK_SCORE=0.3`；实测无关问题返回 0 引用且拒答。
+- **Files:** `.env`、`.env.example`、`config.py`（记录字段）。
+
+### 2026-07-15 — 答复无出处（include_references 未开）
+- **Symptom:** `/query` 只返回 answer，不知来源 chunk。
+- **Root cause:** 项目用向后兼容的 `rag.aquery`（只返回 LLM 文本，丢弃 references）；`QueryParam.include_references` 未设。
+- **Fix:** `ask()` 改用 `rag.aquery_llm` 取完整结果，提取 `data.references`；`QueryParam` 显式传 `include_references=True`；`QueryResponse` 加 `references` 字段；`/chat` SSE 增加 `references` 事件。
+- **Files:** `src/query.py`、`src/api.py`、`main.py`、`config.py`、`.env`。
+
 ## Resolved（当前轮：LLM 分流）
 
 ### 2026-07-15 — Qwen-7b 本地实体抽取 8 分钟失控生成拖崩笔记本 GPU

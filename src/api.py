@@ -42,6 +42,7 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     mode: QueryMode
+    references: list = Field(default_factory=list, description="引用出处 [{reference_id, file_path}]")
 
 
 class IngestRequest(BaseModel):
@@ -107,12 +108,14 @@ async def health() -> dict:
 
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(req: QueryRequest) -> QueryResponse:
-    """对图谱提问，返回答案。"""
+    """对图谱提问，返回答案 + 引用出处。"""
     try:
-        answer = await ask(req.question, mode=req.mode, stream=False)
+        result = await ask(req.question, mode=req.mode, stream=False)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败：{e}")
-    return QueryResponse(answer=answer, mode=req.mode)
+    return QueryResponse(
+        answer=result["answer"], mode=req.mode, references=result["references"]
+    )
 
 
 class ChatMessage(BaseModel):
@@ -137,8 +140,8 @@ async def chat_endpoint(req: ChatRequest):
 
     async def event_stream():
         try:
-            async for chunk in ask_stream(req.question, mode=req.mode, history=history):
-                yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
+            async for evt in ask_stream(req.question, mode=req.mode, history=history):
+                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"

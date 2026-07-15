@@ -57,9 +57,14 @@ def ingest(file: str, max_chunks: int | None) -> None:
 def query(question: str, mode: str) -> None:
     """对图谱提问。"""
     console.print(f"[cyan]问题[/cyan] ({mode}): {question}")
-    answer = asyncio.run(ask(question, mode=mode))  # type: ignore[arg-type]
+    result = asyncio.run(ask(question, mode=mode))  # type: ignore[arg-type]
     console.print("\n[bold green]回答:[/bold green]")
-    console.print(answer)
+    console.print(result["answer"])
+    refs = result.get("references", [])
+    if refs:
+        console.print("\n[dim]引用出处:[/dim]")
+        for r in refs:
+            console.print(f"  - {r.get('file_path', '?')} ({r.get('reference_id', '?')})")
 
 
 @cli.command()

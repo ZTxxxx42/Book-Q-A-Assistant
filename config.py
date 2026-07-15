@@ -105,6 +105,25 @@ class Settings:
     chunk_overlap: int = field(default_factory=lambda: int(os.getenv("CHUNK_OVERLAP", "100")))
     language: str = field(default_factory=lambda: os.getenv("LANGUAGE", "chinese"))
 
+    # --- 查询 / 检索质量（QueryParam 旋钮，显式传入 LightRAG）---
+    # 实体/关系召回数；小库可下调。
+    top_k: int = field(default_factory=lambda: int(os.getenv("TOP_K", "40")))
+    # 向量召回 + rerank 后保留的 chunk 数。
+    chunk_top_k: int = field(default_factory=lambda: int(os.getenv("CHUNK_TOP_K", "12")))
+    # rerank 分数门槛；0.0 = 不过滤（默认 LightRAG 行为）。0.3 过滤低相关 chunk。
+    # 注意：LightRAG 直接读 MIN_RERANK_SCORE env，这里仅作记录与统一管理。
+    min_rerank_score: float = field(
+        default_factory=lambda: float(os.getenv("MIN_RERANK_SCORE", "0.3"))
+    )
+    # 答复是否附引用出处（reference_id + file_path）。
+    include_references: bool = field(
+        default_factory=lambda: os.getenv("INCLUDE_REFERENCES", "true").lower() == "true"
+    )
+    # 答复格式：Multiple Paragraphs / Single Paragraph / Bullet Points。
+    response_type: str = field(
+        default_factory=lambda: os.getenv("RESPONSE_TYPE", "Single Paragraph")
+    )
+
     def ensure_dirs(self) -> None:
         self.working_dir.mkdir(parents=True, exist_ok=True)
         DATA_DIR.mkdir(parents=True, exist_ok=True)

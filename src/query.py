@@ -1,7 +1,7 @@
 """查询接口：基于已构建的 LightRAG + Neo4j 图谱。"""
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, AsyncIterator, Literal
 
 from config import settings
 from src.graph_builder import _build_rag
@@ -9,56 +9,74 @@ from src.graph_builder import _build_rag
 QueryMode = Literal["local", "global", "hybrid", "naive"]
 
 
+def _make_param(mode: QueryMode, stream: bool, history: list[dict] | None = None):
+    """统一构造 QueryParam，显式传入所有检索旋钮 + enable_rerank（修 /query 非流式不对称 bug）。"""
+    from lightrag import QueryParam
+
+    return QueryParam(
+        mode=mode,
+        stream=stream,
+        enable_rerank=settings.enable_rerank,
+        top_k=settings.top_k,
+        chunk_top_k=settings.chunk_top_k,
+        include_references=settings.include_references,
+        response_type=settings.response_type,
+        conversation_history=history or [],
+    )
+
+
 async def ask(
     question: str,
     mode: QueryMode = "hybrid",
     stream: bool = False,
-) -> str:
-    """对图谱提问，返回答案文本。"""
-    from lightrag import QueryParam
+) -> dict[str, Any]:
+    """对图谱提问，返回 ``{"answer": str, "references": list}``。
 
+    用 aquery_llm 取完整结果（含 references），而非向后兼容的 aquery（丢弃 references）。
+    """
     rag = _build_rag()
     await rag.initialize_storages()
-    param = QueryParam(mode=mode, stream=stream)
+    param = _make_param(mode, stream=False)
 
-    if stream:
-        result = ""
-        async for chunk in await rag.aquery(question, param=param):
-            result += chunk
-        return result
-
-    return await rag.aquery(question, param=param)  # type: ignore[return-value]
+    result = await rag.aquery_llm(question, param=param)
+    llm_resp = result.get("llm_response", {})
+    content = llm_resp.get("content", "")
+    refs = result.get("data", {}).get("references", [])
+    return {"answer": content, "references": refs}
 
 
 async def ask_stream(
     question: str,
     mode: QueryMode = "hybrid",
     history: list[dict] | None = None,
-):
-    """流式问答生成器：逐 token 产出答案，并带入多轮对话历史。
+) -> AsyncIterator[dict[str, Any]]:
+    """流式问答生成器：yield 事件 dict，并带入多轮对话历史。
 
-    history 为 [{"role":"user"|"assistant","content":"..."}] 格式，
-    交给 LightRAG 的 conversation_history 做上下文连续问答。
+    事件序列：
+    - ``{"type": "references", "content": [...]}``（检索后、生成前，附引用出处）
+    - ``{"type": "token", "content": "..."}``（逐 token）
+    生成结束自然停止（调用方发 done）。
     """
-    from lightrag import QueryParam
-
     rag = _build_rag()
     await rag.initialize_storages()
-    param = QueryParam(
-        mode=mode,
-        stream=True,
-        enable_rerank=settings.enable_rerank,
-        conversation_history=history or [],
-    )
-    result = await rag.aquery(question, param=param)
-    # 流式正常返回 AsyncIterator；若 LLM 未走流式分支会退回 str，一次性 yield 兜底
-    if isinstance(result, str):
-        if result:
-            yield result
-        return
-    async for chunk in result:
-        if chunk:
-            yield chunk
+    param = _make_param(mode, stream=True, history=history)
+
+    result = await rag.aquery_llm(question, param=param)
+    refs = result.get("data", {}).get("references", [])
+    if refs:
+        yield {"type": "references", "content": refs}
+
+    llm_resp = result.get("llm_response", {})
+    iterator = llm_resp.get("response_iterator")
+    if iterator is not None:
+        async for chunk in iterator:
+            if chunk:
+                yield {"type": "token", "content": chunk}
+    else:
+        # 未走流式分支的兜底：一次性 yield 完整内容
+        content = llm_resp.get("content", "")
+        if content:
+            yield {"type": "token", "content": content}
 
 
 def cypher_query(cypher: str) -> list[dict]:
