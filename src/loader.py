@@ -1,6 +1,6 @@
 """书籍加载与分块。
 
-支持 PDF / TXT / Markdown / EPUB。统一输出纯文本，再交给 LightRAG 的 chunking。
+支持 PDF / TXT / Markdown / EPUB / DOCX。统一输出纯文本，再交给 LightRAG 的 chunking。
 """
 from __future__ import annotations
 
@@ -33,6 +33,20 @@ def _read_epub(path: Path) -> str:
     return "\n\n".join(parts)
 
 
+def _read_docx(path: Path) -> str:
+    # python-docx 抽段落文本。表格按行序列化为制表符分隔句行，保留结构信息。
+    import docx
+
+    doc = docx.Document(str(path))
+    parts: list[str] = [p.text for p in doc.paragraphs if p.text and p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text and c.text.strip()]
+            if cells:
+                parts.append("\t".join(cells))
+    return "\n\n".join(parts)
+
+
 def _read_plain(path: Path) -> str:
     # 自动尝试常见编码
     for enc in ("utf-8", "gbk", "gb18030", "utf-16"):
@@ -46,6 +60,7 @@ def _read_plain(path: Path) -> str:
 _READERS = {
     ".pdf": _read_pdf,
     ".epub": _read_epub,
+    ".docx": _read_docx,
     ".txt": _read_plain,
     ".md": _read_plain,
     ".markdown": _read_plain,
@@ -60,7 +75,7 @@ def load_book(path: str | Path) -> str:
 
     reader = _READERS.get(path.suffix.lower())
     if reader is None:
-        raise ValueError(f"不支持的格式：{path.suffix}（支持 pdf/txt/md/epub）")
+        raise ValueError(f"不支持的格式：{path.suffix}（支持 pdf/txt/md/epub/docx）")
 
     text = reader(path)
     text = _normalize(text)
