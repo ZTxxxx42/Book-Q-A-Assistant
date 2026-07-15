@@ -86,6 +86,13 @@ See `docs/TROUBLESHOOTING.md` for the full iteration log. The non-obvious ones:
 4. **Neo4j Community edition** can't create named databases, so LightRAG's `chunk-entity-relation` DB request logs "not found... Fallback to use the default database" — harmless, falls back to `neo4j` default DB.
 5. **Ollama concurrency**: default `OLLAMA_NUM_PARALLEL=1`, so `QUERY_LLM_MODEL_MAX_ASYNC=1`. Raising it requires starting Ollama with `OLLAMA_NUM_PARALLEL=N` and enough VRAM for N concurrent Qwen contexts.
 6. **Local Qwen is answer-only**: do NOT route `extract`/`keyword` roles to the local Qwen — long extraction generation crashes this 30W laptop GPU (see TROUBLESHOOTING). Extraction stays on remote GLM.
+7. **Production hardening (phase 5)** — query fault-tolerance + concurrency:
+   - **Hard refuse (A1)**: `query.ask`/`ask_stream` probe with `rag.aquery_data` (only_need_context, **no LLM call**) first; if references < `MIN_HIT_COUNT` → return `HARD_REFUSE_ANSWER` without touching Ollama. Post-check: empty refs/content after `aquery_llm` → also refuse. SSE emits `{"type":"refuse"}`.
+   - **LLM robustness (A2)**: `_make_llm_func` has `timeout` (GLM 60s / Qwen 120s) + retries 429 (6×) and connection/timeout errors (3×) + empty-response raises `EmptyLLMResponseError` + stream first-token timeout. `/query` overall timeout 180s → 504.
+   - **Instance pool (B0)**: `src/rag_pool.py` `RagPool` caches LightRAG per workspace (LRU, `finalize_storages` on evict). `query`/`maintenance._rag` use the pool; `ingest_book`/`delete_document` build exclusive + finalize + `invalidate` the pool entry. Lifespan starts/shuts the pool.
+   - **Global concurrency gate (B1)**: `lifespan` calls `initialize_share_data(global_concurrency_limits={llm:extract:2, llm:keyword:2, llm:query:1, embedding:4, rerank:4})` once — makes LightRAG's per-instance `max_async` semaphores participate in a cross-instance global limit (zero source patch). `llm:query=1` serializes Ollama across requests.
+   - **Rate limit (B2)**: `Semaphore(MAX_CONCURRENT_REQUESTS=8)` non-blocking → 503 + Retry-After; ingest `Semaphore(1)`. Input validation: `book` regex whitelist + `max_length` + `_ensure_book_exists` precheck; errors desensitized via `_safe_detail`.
+   - **Async ingest (B3)**: `/documents/upsert` and `/documents/{book}/refresh` return `task_id` immediately; `_submit_ingest_task` holds `_task_ref` (anti-GC) + TTL cleanup; frontend `pollTask` polls `/tasks/{id}`.
 7. **SiliconFlow rerank score range**: code assumes `relevance_score ∈ [0,1]` but sigmoid-normalizes anything outside (raw logit fallback). Verified in [0,1] via smoke.
 8. **GLM 429**: `LLM_MODEL_MAX_ASYNC=2` + 6-retry backoff. If 429 persists, drop to 1.
 

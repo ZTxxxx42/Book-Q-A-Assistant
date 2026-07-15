@@ -17,26 +17,58 @@ from config import settings
 from src.loader import load_book, split_into_chunks
 
 
-def _make_llm_func(api_key: str, base_url: str | None, model: str, streaming_enabled: bool):
+def _make_llm_func(
+    api_key: str,
+    base_url: str | None,
+    model: str,
+    streaming_enabled: bool,
+    timeout: float = 60.0,
+    first_token_timeout: float = 60.0,
+):
     """构造通用 LightRAG LLM callable（OpenAI 兼容端点）。
 
     支持流式：当 kwargs 含 stream=True 时返回 async generator 逐 token yield，
     让 LightRAG 的 aquery(stream=True) 判定 is_streaming=True、真正流式输出。
-    非流式分支（实体抽取等）返回完整字符串。带 tenacity 重试（RateLimitError）。
+    非流式分支（实体抽取等）返回完整字符串。
+
+    鲁棒性：
+    - tenacity 重试 RateLimitError(429, 6 次) + 连接/超时错误(3 次)，指数退避 2-60s。
+    - 显式 ``timeout`` 防请求永久挂起。
+    - 非流式空响应抛 ``EmptyLLMResponseError``，不静默成功。
+    - 流式首 token 超时（``first_token_timeout``）防 Ollama 卡死不 yield。
     """
+    import asyncio
+
+    from openai import (
+        APIConnectionError,
+        APITimeoutError,
+        RateLimitError,
+    )
     from tenacity import (
         retry,
         retry_if_exception_type,
-        stop_after_attempt,
         wait_exponential,
     )
-    from openai import RateLimitError
 
-    client = AsyncOpenAI(api_key=api_key or "token-abc", base_url=base_url)
+    from src.errors import EmptyLLMResponseError
+
+    client = AsyncOpenAI(
+        api_key=api_key or "token-abc", base_url=base_url, timeout=timeout
+    )
+
+    def _stop_by_type(retry_state):
+        """429 重试 6 次，连接/超时错误重试 3 次。"""
+        exc = retry_state.outcome.exception()
+        n = retry_state.attempt_number
+        if isinstance(exc, RateLimitError):
+            return n >= 6
+        return n >= 3
 
     @retry(
-        retry=retry_if_exception_type(RateLimitError),
-        stop=stop_after_attempt(6),
+        retry=retry_if_exception_type(
+            (RateLimitError, APIConnectionError, APITimeoutError, asyncio.TimeoutError)
+        ),
+        stop=_stop_by_type,
         wait=wait_exponential(multiplier=2, min=2, max=60),
         reraise=True,
     )
@@ -62,24 +94,53 @@ def _make_llm_func(api_key: str, base_url: str | None, model: str, streaming_ena
 
         if stream and streaming_enabled:
             # 流式：返回 async generator（LightRAG 会 async for 消费）
-            return _stream_completion(client, model, messages, create_kwargs)
+            return _stream_completion(
+                client, model, messages, create_kwargs, first_token_timeout
+            )
 
         # 非流式：返回完整字符串（实体抽取走这里）
         resp = await client.chat.completions.create(
             model=model, messages=messages, **create_kwargs
         )
-        return resp.choices[0].message.content or ""
+        content = resp.choices[0].message.content
+        if not content:
+            raise EmptyLLMResponseError(f"{model} 返回空响应")
+        return content
 
     return llm_model_func
 
 
 async def _stream_completion(
-    client: AsyncOpenAI, model: str, messages: list[dict], create_kwargs: dict
+    client: AsyncOpenAI,
+    model: str,
+    messages: list[dict],
+    create_kwargs: dict,
+    first_token_timeout: float = 60.0,
 ) -> AsyncIterator[str]:
-    """流式生成器：逐 delta yield 文本片。"""
+    """流式生成器：逐 delta yield 文本片。
+
+    首 token 超时：若 ``first_token_timeout`` 秒内未 yield 任何内容，抛
+    ``asyncio.TimeoutError``（被上层重试/兜底捕获），防 Ollama 卡死。
+    """
+    import asyncio
+
     resp = await client.chat.completions.create(
         model=model, messages=messages, **create_kwargs
     )
+
+    async def _first_token():
+        async for delta in resp:
+            if not delta.choices:
+                continue
+            content = delta.choices[0].delta.content
+            if content:
+                return content, delta
+        return None, None
+
+    # 等 首 token（或流结束）
+    first_content, _ = await asyncio.wait_for(_first_token(), timeout=first_token_timeout)
+    if first_content:
+        yield first_content
     async for delta in resp:
         if not delta.choices:
             continue
@@ -95,6 +156,8 @@ def _make_glm_func():
         base_url=settings.llm_base_url,
         model=settings.llm_model,
         streaming_enabled=settings.llm_streaming,
+        timeout=settings.llm_timeout,
+        first_token_timeout=settings.stream_first_token_timeout,
     )
 
 
@@ -105,6 +168,8 @@ def _make_qwen_func():
         base_url=settings.query_llm_base_url,
         model=settings.query_llm_model,
         streaming_enabled=settings.query_llm_streaming,
+        timeout=settings.query_llm_timeout,
+        first_token_timeout=settings.stream_first_token_timeout,
     )
 
 
@@ -172,10 +237,25 @@ async def ingest_book(
 
     fname = Path(file_path).name
     # 每本书用 basename 作 workspace → Neo4j 独立 label、Qdrant 独立 workspace_id、KV 独立子目录
+    # ingest 是重写操作，独占实例（不入池），用完 finalize 避免连接泄漏。
     rag = _build_rag(workspace=fname)
     await rag.initialize_storages()
-    full_text = "\n\n".join(chunks)
-    await rag.ainsert(full_text, file_paths=[fname])
+    try:
+        full_text = "\n\n".join(chunks)
+        await rag.ainsert(full_text, file_paths=[fname])
+    finally:
+        try:
+            await rag.finalize_storages()
+        except Exception:
+            pass
+    # ingest 后使池中该 workspace 的旧实例失效（内容已变）
+    try:
+        from src.rag_pool import get_pool
+
+        pool = await get_pool()
+        await pool.invalidate(fname)
+    except Exception:
+        pass
 
     return {
         "file": str(file_path),

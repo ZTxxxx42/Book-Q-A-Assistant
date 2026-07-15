@@ -415,6 +415,18 @@ function onBookChange() {
   loadTop();
 }
 
+async function pollTask(taskId, label) {
+  // 轮询 /tasks/{id} 直到 done/failed；返回结果或抛错。
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    const r = await fetch(API + "/tasks/" + taskId);
+    if (!r.ok) throw new Error("任务查询失败");
+    const t = await r.json();
+    if (t.status === "done") return t.result;
+    if (t.status === "failed") throw new Error(t.error || "任务失败");
+  }
+}
+
 async function ingestFile(upsert) {
   const file = document.getElementById("doc-file").value.trim();
   if (!file) { toast("请输入文件名", "error"); return; }
@@ -427,6 +439,10 @@ async function ingestFile(upsert) {
     });
     const data = await r.json();
     if (!r.ok) { toast((data.detail || "导入失败"), "error"); return; }
+    if (data.task_id) {
+      // 异步任务：轮询
+      await pollTask(data.task_id, upsert ? "Upsert" : "导入");
+    }
     toast((upsert ? "Upsert 完成" : "导入完成") + "：" + (file), "ok");
     await loadDocs();
     // 选中新导入的书并查看其图谱
@@ -455,7 +471,11 @@ window.refreshDoc = async function(name) {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ file: name, max_chunks: null })
     });
-    if (!r.ok) { const e = await r.json(); toast(e.detail || "刷新失败", "error"); return; }
+    const data = await r.json();
+    if (!r.ok) { toast(data.detail || "刷新失败", "error"); return; }
+    if (data.task_id) {
+      await pollTask(data.task_id, "刷新");
+    }
     toast("已刷新：" + name, "ok");
     loadDocs(); loadStats(); loadTop();
   } catch (e) { toast("刷新失败：" + e, "error"); }
@@ -534,6 +554,8 @@ async function askQuestion() {
           answer += evt.content;
           els.content.textContent = answer;
           chatLog.scrollTop = chatLog.scrollHeight;
+        } else if (evt.type === "refuse") {
+          els.content.textContent = "⚠️ " + evt.content; return;
         } else if (evt.type === "error") {
           els.content.textContent = "❌ " + evt.content; return;
         } else if (evt.type === "done") { break; }

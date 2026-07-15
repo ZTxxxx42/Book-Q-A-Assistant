@@ -11,6 +11,22 @@
 - **本地 Qwen 答复稳定性**：query 角色单次答复几百 token，远短于引发崩溃的 8 分钟抽取；若 SSE 异常则改非流式或换 3b。
 - **网络延迟**：每次 query 多 2 个 SiliconFlow RTT（~100-300ms），demo 可接受。
 
+## Resolved（当前轮：阶段 5 生产硬化 — Query 容错 + 高并发）
+
+### 2026-07-15 — 无关 query 仍调 LLM 致幻觉 + LLM 无超时 + 连接泄漏 + 并发限制失效
+- **Symptom:** rerank 过滤后 0 chunk 仍无条件调 Qwen（operate.py:5940），仅靠 prompt 自觉拒答；`_make_llm_func` 仅重试 429、无 timeout、空响应静默成功；每请求新建 LightRAG + Neo4j driver/Qdrant client 且从不 finalize（泄漏）；`max_async` 信号量 per-instance + 从未调 `initialize_share_data` → 跨请求并发限制完全失效（N 并发 = N×2 GLM 429 + N 并发 Ollama 雪崩）；无输入校验/限流/超时；`_tasks` 无加固；upsert/refresh 同步阻塞事件循环。
+- **Fix:**
+  - A1 硬拒答双保险：`query.ask`/`ask_stream` 先 `rag.aquery_data`（only_need_context，不调 LLM）探测 references，命中 < `MIN_HIT_COUNT` 直接拒答；事后 references 空/内容空再兜底拒答。
+  - A2：`_make_llm_func` 加 timeout（GLM 60s/Qwen 120s）+ 重试扩展（429 六次、连接/超时三次）+ 空响应抛 `EmptyLLMResponseError` + 流式首 token 超时。
+  - B0：新建 `src/rag_pool.py` LRU 池（按 workspace 缓存 + finalize 淘汰 + invalidate）；query/maintenance 改用池；ingest/delete 独占。
+  - B1：`lifespan` 调 `initialize_share_data(global_concurrency_limits={llm:extract:2, llm:keyword:2, llm:query:1, embedding:4, rerank:4})` 启用跨实例全局闸。
+  - B2：`Semaphore(8)` 限流（非阻塞 503）+ ingest `Semaphore(1)` + `/query` 180s 超时。
+  - B3：`_submit_ingest_task` 统一异步 + 持有 task_ref 防 GC + TTL 清理；upsert/refresh 立即返回 task_id；前端 `pollTask` 轮询；serve.py port 8010/reload False/workers 1。
+  - A0：`book` 正则白名单 + max_length + `_ensure_book_exists` 预检 + `_safe_detail` 错误脱敏。
+- **验证:** 空/穿越/超长输入 422、不存在 book 404；无关问题硬拒答不调 LLM；正常 query 带引用；15 并发部分 503；upsert 异步 task_id 轮询 done；re-ingest 后池失效读到新数据。
+- **Files:** `src/query.py`、`src/graph_builder.py`、`src/rag_pool.py`(新)、`src/errors.py`(新)、`src/maintenance.py`、`src/api.py`、`config.py`、`serve.py`、`static/index.html`、`.env.example`。
+- **报告:** `docs/reports/phase5-production-hardening.md`。
+
 ## Resolved（当前轮：阶段 4 每书独立工作区）
 
 ### 2026-07-15 — 多书合并图语义混乱 + 按书过滤 hack 脆弱

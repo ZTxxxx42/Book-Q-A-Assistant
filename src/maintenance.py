@@ -7,18 +7,44 @@ KV 子目录都按 workspace 隔离。基于 LightRAG 1.5.x 维护 API（adelete
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from config import settings
 from src.graph_builder import _build_rag
 from src.loader import resolve_book_path
 
 
-async def _rag(workspace: str):
+@asynccontextmanager
+async def _rag(workspace: str) -> AsyncIterator[Any]:
+    """从实例池取一个 LightRAG（只读 / 轻量写用）。
+
+    用完归还池（不 finalize）。重操作（ingest / delete_document）用 _rag_exclusive。
+    """
+    from src.rag_pool import get_pool
+
+    pool = await get_pool()
+    rag = await pool.acquire(workspace)
+    try:
+        yield rag
+    finally:
+        await pool.release(workspace)
+
+
+async def _rag_exclusive(workspace: str):
+    """独占构建一个 LightRAG（重写操作用），调用方负责 finalize_storages。"""
     rag = _build_rag(workspace=workspace)
     await rag.initialize_storages()
     return rag
+
+
+async def _invalidate_pool(workspace: str) -> None:
+    """重写后使池中该 workspace 的实例失效（删除其可能过期的缓存实例）。"""
+    from src.rag_pool import get_pool
+
+    pool = await get_pool()
+    await pool.invalidate(workspace)
 
 
 # ---------- 文档级 ----------
@@ -65,26 +91,26 @@ def list_documents() -> list[dict]:
 
 async def get_document(book: str) -> dict | None:
     """取单本书文档详情（按 workspace）。"""
-    rag = await _rag(book)
     from lightrag.base import DocStatus
 
-    for st in DocStatus:
-        try:
-            docs = await rag.get_docs_by_status(st)
-        except Exception:
-            continue
-        for doc_id, d in docs.items():
-            status_val = d.status.value if hasattr(d.status, "value") else str(d.status)
-            return {
-                "doc_id": doc_id,
-                "file_path": d.file_path,
-                "workspace": book,
-                "status": status_val,
-                "content_length": d.content_length,
-                "chunks_count": d.chunks_count,
-                "content_summary": d.content_summary,
-                "created_at": d.created_at,
-            }
+    async with _rag(book) as rag:
+        for st in DocStatus:
+            try:
+                docs = await rag.get_docs_by_status(st)
+            except Exception:
+                continue
+            for doc_id, d in docs.items():
+                status_val = d.status.value if hasattr(d.status, "value") else str(d.status)
+                return {
+                    "doc_id": doc_id,
+                    "file_path": d.file_path,
+                    "workspace": book,
+                    "status": status_val,
+                    "content_length": d.content_length,
+                    "chunks_count": d.chunks_count,
+                    "content_summary": d.content_summary,
+                    "created_at": d.created_at,
+                }
     return None
 
 
@@ -101,16 +127,21 @@ async def delete_document(book: str) -> dict:
             pass
 
     deleted_info: dict[str, Any] = {"file_path": book, "doc_id": doc_id}
-    # 2) LightRAG 原生删除（同步 Qdrant + Neo4j + KV 索引）
+    # 2) LightRAG 原生删除（同步 Qdrant + Neo4j + KV 索引）— 独占实例，避免与查询实例冲突
     if doc_id:
+        rag = await _rag_exclusive(book)
         try:
-            rag = await _rag(book)
             res = await rag.adelete_by_doc_id(doc_id)
             deleted_info["status"] = res.status
             deleted_info["message"] = res.message
         except Exception as e:
             deleted_info["status"] = "failed"
             deleted_info["message"] = str(e)
+        finally:
+            try:
+                await rag.finalize_storages()
+            except Exception:
+                pass
 
     # 3) 兜底：直接按 Neo4j label 删节点（防 LightRAG 漏删）+ 删 KV 子目录
     from src.query import cypher_query
@@ -129,6 +160,8 @@ async def delete_document(book: str) -> dict:
 
     deleted_info.setdefault("status", "deleted")
     deleted_info.setdefault("message", f"workspace {book} removed")
+    # 4) 使池中该 workspace 的实例失效（已删，避免复用过期实例）
+    await _invalidate_pool(book)
     return deleted_info
 
 
@@ -166,17 +199,17 @@ async def edit_entity(
     book: str | None = None,
 ) -> dict:
     """编辑实体（按 workspace）。"""
-    rag = await _rag(book or "")
-    await rag.aedit_entity(
-        entity_name, updated_data, allow_rename=allow_rename, allow_merge=allow_merge
-    )
+    async with _rag(book or "") as rag:
+        await rag.aedit_entity(
+            entity_name, updated_data, allow_rename=allow_rename, allow_merge=allow_merge
+        )
     return {"entity": entity_name, "updated": True}
 
 
 async def delete_entity(entity_name: str, book: str | None = None) -> dict:
     """删除实体（按 workspace）。"""
-    rag = await _rag(book or "")
-    await rag.adelete_entity(entity_name)
+    async with _rag(book or "") as rag:
+        await rag.adelete_entity(entity_name)
     return {"entity": entity_name, "deleted": True}
 
 
@@ -184,13 +217,13 @@ async def edit_relation(
     source: str, target: str, updated_data: dict[str, str], book: str | None = None
 ) -> dict:
     """编辑关系（按 workspace）。"""
-    rag = await _rag(book or "")
-    await rag.aedit_relation(source, target, updated_data)
+    async with _rag(book or "") as rag:
+        await rag.aedit_relation(source, target, updated_data)
     return {"relation": f"{source}->{target}", "updated": True}
 
 
 async def delete_relation(source: str, target: str, book: str | None = None) -> dict:
     """删除关系（按 workspace）。"""
-    rag = await _rag(book or "")
-    await rag.adelete_relation(source, target)
+    async with _rag(book or "") as rag:
+        await rag.adelete_relation(source, target)
     return {"relation": f"{source}->{target}", "deleted": True}

@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,11 +12,12 @@ from typing import Literal
 
 import json
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from config import settings
 from src.graph_builder import ingest_book
 from src.graph_view import get_subgraph, get_top_entities
 from src.maintenance import (
@@ -25,19 +29,42 @@ from src.maintenance import (
     get_document,
     list_documents,
     refresh_document,
+    upsert_document,
 )
 from src.query import ask, ask_stream, cypher_query, graph_stats
+from src.rag_pool import get_pool, shutdown_pool
+
+logger = logging.getLogger("book_kg.api")
+logging.basicConfig(level=logging.INFO)
 
 QueryMode = Literal["local", "global", "hybrid", "naive"]
+
+# book 文件名白名单：防路径穿越 / Cypher 注入（允许字母数字 _ - . 及中文）
+_BOOK_NAME_RE = re.compile(r"^[A-Za-z0-9_\-\.一-龥]+$")
+
+
+def _validate_book(v: str) -> str:
+    if not v or len(v) > settings.max_book_name_length:
+        raise ValueError(f"book 长度需在 1..{settings.max_book_name_length} 之间")
+    if not _BOOK_NAME_RE.match(v):
+        raise ValueError("book 含非法字符")
+    if "/" in v or "\\" in v or ".." in v:
+        raise ValueError("book 含路径分隔符")
+    return v
 
 
 # ---------- 请求 / 响应模型 ----------
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="问题")
+    question: str = Field(..., min_length=1, max_length=settings.max_question_length, description="问题")
     mode: QueryMode = Field("hybrid", description="检索模式")
     stream: bool = Field(False, description="流式返回（暂不支持，预留）")
     book: str = Field(..., description="书籍文件名（= workspace，仅检索该书图谱）")
+
+    @field_validator("book")
+    @classmethod
+    def _check_book(cls, v: str) -> str:
+        return _validate_book(v)
 
 
 class QueryResponse(BaseModel):
@@ -73,10 +100,108 @@ class StatsResponse(BaseModel):
 
 _tasks: dict[str, dict] = {}
 
+# 限流（B2）：HTTP 入口并发上限 + ingest 并发上限
+_query_concurrency: asyncio.Semaphore | None = None
+_ingest_concurrency: asyncio.Semaphore | None = None
+
+
+def _query_sem() -> asyncio.Semaphore:
+    global _query_concurrency
+    if _query_concurrency is None:
+        _query_concurrency = asyncio.Semaphore(settings.max_concurrent_requests)
+    return _query_concurrency
+
+
+def _ingest_sem() -> asyncio.Semaphore:
+    global _ingest_concurrency
+    if _ingest_concurrency is None:
+        _ingest_concurrency = asyncio.Semaphore(settings.max_concurrent_ingest)
+    return _ingest_concurrency
+
+
+async def _try_acquire(sem: asyncio.Semaphore) -> bool:
+    """非阻塞获取信号量：成功 True，已满 False（用于立即返回 503）。"""
+    if sem._value <= 0:  # noqa: SLF001
+        return False
+    try:
+        sem._value -= 1  # noqa: SLF001
+        return True
+    except Exception:
+        return False
+
+
+def _release(sem: asyncio.Semaphore) -> None:
+    sem.release()
+
+
+def _ensure_book_exists(book: str) -> None:
+    """book workspace 存在性预检：避免后续空检索/初始化浪费。不存在 → 404。"""
+    from src.maintenance import _doc_status_path
+
+    if not _doc_status_path(book).exists():
+        raise HTTPException(status_code=404, detail=f"书籍不存在：{book}")
+
+
+def _safe_detail(prefix: str, e: Exception) -> str:
+    """对外脱敏的错误消息；完整异常写日志。"""
+    logger.exception("%s: %r", prefix, e)
+    return f"{prefix}（详情见服务端日志）"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    yield
+    # B1：全局并发闸 —— 让 LightRAG 的 max_async 跨实例真正生效（零改源码）
+    try:
+        from lightrag.kg.shared_storage import initialize_share_data
+
+        initialize_share_data(
+            workers=1,
+            global_concurrency_limits={
+                "llm:extract": settings.global_extract_concurrency,
+                "llm:keyword": settings.global_keyword_concurrency,
+                "llm:query": settings.global_query_concurrency,
+                "embedding": settings.global_embedding_concurrency,
+                "rerank": settings.global_rerank_concurrency,
+            },
+        )
+        logger.info("全局并发闸已启用: %s", {
+            "llm:extract": settings.global_extract_concurrency,
+            "llm:keyword": settings.global_keyword_concurrency,
+            "llm:query": settings.global_query_concurrency,
+            "embedding": settings.global_embedding_concurrency,
+            "rerank": settings.global_rerank_concurrency,
+        })
+    except Exception as e:
+        logger.warning("initialize_share_data 失败（并发闸未启用）: %r", e)
+    # 预热实例池
+    await get_pool()
+    # 后台 TTL 清理任务
+    cleanup_task = asyncio.create_task(_task_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        await shutdown_pool()
+
+
+async def _task_cleanup_loop() -> None:
+    """定期清理过期的 done/failed 任务（TTL）。"""
+    while True:
+        try:
+            await asyncio.sleep(300)
+            now = time.time()
+            expired = [
+                tid for tid, t in _tasks.items()
+                if t.get("status") in ("done", "failed")
+                and t.get("finished_at")
+                and now - t["finished_at"] > settings.task_ttl
+            ]
+            for tid in expired:
+                _tasks.pop(tid, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
 
 
 app = FastAPI(
@@ -110,10 +235,23 @@ async def health() -> dict:
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(req: QueryRequest) -> QueryResponse:
     """对图谱提问，返回答案 + 引用出处。"""
+    _ensure_book_exists(req.book)
+    sem = _query_sem()
+    if not await _try_acquire(sem):
+        raise HTTPException(
+            status_code=503, detail="服务繁忙，请稍后重试", headers={"Retry-After": "5"}
+        )
     try:
-        result = await ask(req.question, book=req.book, mode=req.mode, stream=False)
+        result = await asyncio.wait_for(
+            ask(req.question, book=req.book, mode=req.mode, stream=False),
+            timeout=settings.query_overall_timeout,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="查询超时")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("查询失败", e))
+    finally:
+        _release(sem)
     return QueryResponse(
         answer=result["answer"], mode=req.mode, references=result["references"]
     )
@@ -121,14 +259,21 @@ async def query_endpoint(req: QueryRequest) -> QueryResponse:
 
 class ChatMessage(BaseModel):
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(..., min_length=1, max_length=settings.max_question_length)
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1)
+    question: str = Field(..., min_length=1, max_length=settings.max_question_length)
     mode: QueryMode = Field("hybrid")
-    history: list[ChatMessage] = Field(default_factory=list, description="多轮对话历史")
+    history: list[ChatMessage] = Field(
+        default_factory=list, max_length=settings.max_history_turns, description="多轮对话历史"
+    )
     book: str = Field(..., description="书籍文件名（= workspace，仅检索该书图谱）")
+
+    @field_validator("book")
+    @classmethod
+    def _check_book(cls, v: str) -> str:
+        return _validate_book(v)
 
 
 @app.post("/chat")
@@ -136,17 +281,29 @@ async def chat_endpoint(req: ChatRequest):
     """流式问答（SSE）：逐 token 返回，支持多轮对话历史。
 
     事件格式：`data: {"type":"token","content":"..."}\\n\\n`
+    拒答：`data: {"type":"refuse","content":"..."}\\n\\n`
     结束：`data: {"type":"done"}\\n\\n`；出错：`data: {"type":"error","content":"..."}\\n\\n`
     """
+    _ensure_book_exists(req.book)
+    sem = _query_sem()
+    if not await _try_acquire(sem):
+        raise HTTPException(
+            status_code=503, detail="服务繁忙，请稍后重试", headers={"Retry-After": "5"}
+        )
     history = [{"role": m.role, "content": m.content} for m in req.history]
 
     async def event_stream():
         try:
-            async for evt in ask_stream(req.question, book=req.book, mode=req.mode, history=history):
+            async for evt in ask_stream(
+                req.question, book=req.book, mode=req.mode, history=history
+            ):
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)}, ensure_ascii=False)}\n\n"
+            logger.exception("chat 流式异常: %r", e)
+            yield f"data: {json.dumps({'type': 'error', 'content': '答复服务暂不可用'}, ensure_ascii=False)}\n\n"
+        finally:
+            _release(sem)
 
     return StreamingResponse(
         event_stream(),
@@ -163,10 +320,17 @@ async def ingest_endpoint(req: IngestRequest) -> IngestResponse:
     path = resolve_book_path(req.file)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"书籍不存在：{path}")
+    sem = _ingest_sem()
+    if not await _try_acquire(sem):
+        raise HTTPException(
+            status_code=503, detail="ingest 服务繁忙，请稍后重试", headers={"Retry-After": "10"}
+        )
     try:
         info = await ingest_book(str(path), max_chunks=req.max_chunks)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"导入失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("导入失败", e))
+    finally:
+        _release(sem)
     return IngestResponse(**info)
 
 
@@ -178,19 +342,7 @@ async def ingest_async_endpoint(req: IngestRequest) -> dict:
     path = resolve_book_path(req.file)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"书籍不存在：{path}")
-
-    task_id = uuid.uuid4().hex
-    _tasks[task_id] = {"status": "running", "file": str(path), "result": None, "error": None}
-
-    async def _run() -> None:
-        try:
-            info = await ingest_book(str(path), max_chunks=req.max_chunks)
-            _tasks[task_id] = {"status": "done", "file": str(path), "result": info, "error": None}
-        except Exception as e:
-            _tasks[task_id] = {"status": "failed", "file": str(path), "result": None, "error": str(e)}
-
-    asyncio.create_task(_run())
-    return {"task_id": task_id, "status": "running"}
+    return await _submit_ingest_task(str(path), req.max_chunks, kind="ingest")
 
 
 class UpsertRequest(BaseModel):
@@ -200,33 +352,80 @@ class UpsertRequest(BaseModel):
 
 @app.post("/documents/upsert")
 async def upsert_document_endpoint(req: UpsertRequest) -> dict:
-    """按文件名 upsert：同 basename 已存在则先删后导，不存在则直接导入。"""
+    """按文件名 upsert（异步）：同 basename 已存在则先删后导。立即返回 task_id。"""
     from src.loader import resolve_book_path
-    from src.maintenance import upsert_document
 
     path = resolve_book_path(req.file)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"书籍不存在：{path}")
-    try:
-        return await upsert_document(str(path), max_chunks=req.max_chunks)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"upsert 失败：{e}")
+    return await _submit_ingest_task(str(path), req.max_chunks, kind="upsert")
 
 
 @app.get("/tasks/{task_id}")
 async def get_task(task_id: str) -> dict:
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="任务不存在")
-    return _tasks[task_id]
+    t = _tasks[task_id]
+    # 不把内部字段（_task_ref）暴露给客户端
+    return {k: v for k, v in t.items() if not k.startswith("_")}
+
+
+async def _submit_ingest_task(
+    file_path: str, max_chunks: int | None, kind: str
+) -> dict:
+    """统一的异步 ingest 类任务提交：限流 + 任务追踪 + 防 GC。
+
+    ``kind``: "ingest" | "upsert" | "refresh"。
+    """
+    sem = _ingest_sem()
+    if not await _try_acquire(sem):
+        raise HTTPException(
+            status_code=503, detail="ingest 服务繁忙，请稍后重试", headers={"Retry-After": "10"}
+        )
+
+    task_id = uuid.uuid4().hex
+    _tasks[task_id] = {
+        "status": "running", "kind": kind, "file": file_path,
+        "result": None, "error": None,
+        "started_at": time.time(), "finished_at": None, "_task_ref": None,
+    }
+
+    async def _run() -> None:
+        try:
+            if kind == "ingest":
+                result = await ingest_book(file_path, max_chunks=max_chunks)
+            elif kind == "upsert":
+                result = await upsert_document(file_path, max_chunks=max_chunks)
+            elif kind == "refresh":
+                result = await refresh_document(file_path, max_chunks=max_chunks)
+            else:
+                raise ValueError(f"unknown kind: {kind}")
+            _tasks[task_id].update(
+                {"status": "done", "result": result, "error": None, "finished_at": time.time()}
+            )
+        except Exception as e:
+            logger.exception("ingest 任务 (%s) 失败: %r", kind, e)
+            _tasks[task_id].update(
+                {"status": "failed", "result": None, "error": str(e), "finished_at": time.time()}
+            )
+        finally:
+            _release(sem)
+
+    task = asyncio.create_task(_run())
+    _tasks[task_id]["_task_ref"] = task
+    return {"task_id": task_id, "status": "running"}
 
 
 @app.get("/stats", response_model=StatsResponse)
 async def stats_endpoint(book: str | None = None) -> StatsResponse:
     """查看图谱统计。``book`` 给定时仅统计该书 workspace。"""
+    if book:
+        _validate_book(book)
+        _ensure_book_exists(book)
     try:
         info = graph_stats(book=book)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"统计失败（Neo4j 是否已启动？）：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("统计失败", e))
     return StatsResponse(**info)
 
 
@@ -236,31 +435,43 @@ class GraphRequest(BaseModel):
     depth: int = Field(2, ge=1, le=3, description="跳数：1=直接邻居，2=邻居的邻居")
     limit: int = Field(50, ge=1, le=500, description="返回子图规模上限")
 
+    @field_validator("book")
+    @classmethod
+    def _check_book(cls, v: str) -> str:
+        return _validate_book(v)
+
 
 class TopEntitiesRequest(BaseModel):
     book: str = Field(..., description="书籍文件名（= workspace）")
     limit: int = Field(40, ge=1, le=200, description="返回的热门实体数量")
 
+    @field_validator("book")
+    @classmethod
+    def _check_book(cls, v: str) -> str:
+        return _validate_book(v)
+
 
 @app.post("/graph")
 async def graph_endpoint(req: GraphRequest) -> dict:
     """返回某实体周围的关系子图（nodes + edges），供前端可视化。"""
+    _ensure_book_exists(req.book)
     try:
         sub = get_subgraph(req.entity, book=req.book, depth=req.depth, limit=req.limit)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"子图查询失败（Neo4j 是否已启动？）：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("子图查询失败", e))
     return sub
 
 
 @app.post("/graph/top")
 async def graph_top_endpoint(req: TopEntitiesRequest) -> dict:
     """返回度数最高的实体，用于初始展示。"""
+    _ensure_book_exists(req.book)
     try:
         return get_top_entities(book=req.book, limit=req.limit)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("查询失败", e))
 
 
 # ---------- 维护：文档 / 实体 / 关系 ----------
@@ -290,13 +501,17 @@ async def documents_endpoint() -> list[dict]:
     try:
         return list_documents()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"读取文档列表失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("读取文档列表失败", e))
 
 
 @app.get("/documents/{book}")
 async def document_detail_endpoint(book: str) -> dict:
     """取单本书文档详情（按 workspace）。"""
-    d = await get_document(book)
+    _validate_book(book)
+    try:
+        d = await get_document(book)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_detail("读取文档失败", e))
     if not d:
         raise HTTPException(status_code=404, detail="文档不存在")
     return d
@@ -305,26 +520,32 @@ async def document_detail_endpoint(book: str) -> dict:
 @app.delete("/documents/{book}")
 async def delete_document_endpoint(book: str) -> dict:
     """删除一整本书（其 workspace：Neo4j label 节点 + Qdrant 向量 + KV 子目录）。"""
+    _validate_book(book)
     try:
         return await delete_document(book)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"删除失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("删除失败", e))
 
 
 @app.post("/documents/{book}/refresh")
 async def refresh_document_endpoint(book: str, req: RefreshRequest) -> dict:
-    """刷新一本书：删旧 workspace 后重新导入指定文件。"""
+    """刷新一本书（异步）：删旧 workspace 后重新导入指定文件。立即返回 task_id。"""
+    from src.loader import resolve_book_path
+
+    target = req.file or book
     try:
-        return await refresh_document(req.file or book, max_chunks=req.max_chunks)
+        path = resolve_book_path(target)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"刷新失败：{e}")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"书籍不存在：{path}")
+    return await _submit_ingest_task(str(path), req.max_chunks, kind="refresh")
 
 
 @app.post("/entities/{entity_id}/edit")
 async def edit_entity_endpoint(entity_id: str, req: EditEntityRequest, book: str) -> dict:
     """编辑实体（属性 / 重命名），自动重算 embedding 并同步向量库。"""
+    _validate_book(book)
     updated = {k: v for k, v in req.model_dump().items() if v is not None}
     updated.pop("allow_rename", None)
     updated.pop("allow_merge", None)
@@ -336,16 +557,17 @@ async def edit_entity_endpoint(entity_id: str, req: EditEntityRequest, book: str
             allow_rename=req.allow_rename, allow_merge=req.allow_merge, book=book,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"编辑失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("编辑失败", e))
 
 
 @app.delete("/entities/{entity_id}")
 async def delete_entity_endpoint(entity_id: str, book: str) -> dict:
     """删除单个实体（含其关系），同步清理向量库。"""
+    _validate_book(book)
     try:
         return await delete_entity(entity_id, book=book)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"删除失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("删除失败", e))
 
 
 @app.post("/relations/edit")
@@ -353,22 +575,24 @@ async def edit_relation_endpoint(
     source: str, target: str, req: EditRelationRequest, book: str,
 ) -> dict:
     """编辑一条关系。通过 query 参数 ?source=&target=&book= 指定。"""
+    _validate_book(book)
     updated = {k: v for k, v in req.model_dump().items() if v is not None}
     if not updated:
         raise HTTPException(status_code=400, detail="未提供任何修改字段")
     try:
         return await edit_relation(source, target, updated, book=book)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"编辑失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("编辑失败", e))
 
 
 @app.delete("/relations")
 async def delete_relation_endpoint(source: str, target: str, book: str) -> dict:
     """删除一条关系（保留两端实体）。"""
+    _validate_book(book)
     try:
         return await delete_relation(source, target, book=book)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"删除失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("删除失败", e))
 
 
 @app.post("/cypher")
@@ -379,5 +603,5 @@ async def cypher_endpoint(req: CypherRequest) -> dict:
     try:
         rows = cypher_query(req.cypher)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Cypher 执行失败：{e}")
+        raise HTTPException(status_code=500, detail=_safe_detail("Cypher 执行失败", e))
     return {"rows": rows[: req.limit], "total": len(rows)}

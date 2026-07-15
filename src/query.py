@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, Literal
 
 from config import settings
-from src.graph_builder import _build_rag
+from src.rag_pool import get_pool
 
 QueryMode = Literal["local", "global", "hybrid", "naive"]
 
@@ -25,6 +25,21 @@ def _make_param(mode: QueryMode, stream: bool, history: list[dict] | None = None
     )
 
 
+def _hard_refuse() -> dict[str, Any]:
+    """硬拒答：无关问题，不调 LLM。"""
+    return {"answer": settings.hard_refuse_answer, "references": []}
+
+
+async def _probe_hits(rag: Any, question: str, mode: QueryMode) -> list:
+    """预探测（aquery_data, only_need_context=True，不调 LLM）取 references。
+
+    用于硬拒答：命中数不足则不调答复 LLM，省下 Ollama 串行槽位。
+    """
+    probe_param = _make_param(mode, stream=False)
+    data_result = await rag.aquery_data(question, param=probe_param)
+    return data_result.get("data", {}).get("references", []) or []
+
+
 async def ask(
     question: str,
     book: str,
@@ -34,17 +49,33 @@ async def ask(
     """对指定书的图谱提问，返回 ``{"answer": str, "references": list}``。
 
     ``book`` 为文件 basename，同时是 workspace 名 → 仅检索该书的图+向量+chunk。
-    用 aquery_llm 取完整结果（含 references）。
-    """
-    rag = _build_rag(workspace=book)
-    await rag.initialize_storages()
-    param = _make_param(mode, stream=False)
 
-    result = await rag.aquery_llm(question, param=param)
-    llm_resp = result.get("llm_response", {})
-    content = llm_resp.get("content", "")
-    refs = result.get("data", {}).get("references", [])
-    return {"answer": content, "references": refs}
+    硬拒答双保险：
+    1. 预探测（aquery_data, 不调 LLM）：references 命中数 < min_hit_count → 直接拒答。
+    2. 事后兜底：aquery_llm 返回后 references 仍空 → 丢弃 LLM 答复，改返拒答文案。
+    """
+    pool = await get_pool()
+    rag = await pool.acquire(book)
+    try:
+        # 1) 预探测
+        refs = await _probe_hits(rag, question, mode)
+        if len(refs) < settings.min_hit_count:
+            return _hard_refuse()
+
+        # 2) 检索 + 生成
+        param = _make_param(mode, stream=False)
+        result = await rag.aquery_llm(question, param=param)
+        final_refs = result.get("data", {}).get("references", []) or []
+        # 事后兜底：生成阶段被 rerank 全过滤
+        if len(final_refs) < settings.min_hit_count:
+            return _hard_refuse()
+        llm_resp = result.get("llm_response", {})
+        content = llm_resp.get("content", "") or ""
+        if not content:
+            return _hard_refuse()
+        return {"answer": content, "references": final_refs}
+    finally:
+        await pool.release(book)
 
 
 async def ask_stream(
@@ -53,26 +84,41 @@ async def ask_stream(
     mode: QueryMode = "hybrid",
     history: list[dict] | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
-    """流式问答生成器（限定书）：yield 事件 dict。事件序列：references → token…。"""
-    rag = _build_rag(workspace=book)
-    await rag.initialize_storages()
-    param = _make_param(mode, stream=True, history=history)
+    """流式问答生成器（限定书）：yield 事件 dict。事件序列：references → token…。
 
-    result = await rag.aquery_llm(question, param=param)
-    refs = result.get("data", {}).get("references", [])
-    if refs:
-        yield {"type": "references", "content": refs}
+    硬拒答：预探测命中不足 → yield 单个 refuse 事件，不调 LLM。
+    """
+    pool = await get_pool()
+    rag = await pool.acquire(book)
+    try:
+        refs = await _probe_hits(rag, question, mode)
+        if len(refs) < settings.min_hit_count:
+            yield {"type": "refuse", "content": settings.hard_refuse_answer}
+            return
 
-    llm_resp = result.get("llm_response", {})
-    iterator = llm_resp.get("response_iterator")
-    if iterator is not None:
-        async for chunk in iterator:
-            if chunk:
-                yield {"type": "token", "content": chunk}
-    else:
-        content = llm_resp.get("content", "")
-        if content:
-            yield {"type": "token", "content": content}
+        param = _make_param(mode, stream=True, history=history)
+        result = await rag.aquery_llm(question, param=param)
+        final_refs = result.get("data", {}).get("references", []) or []
+        if len(final_refs) < settings.min_hit_count:
+            yield {"type": "refuse", "content": settings.hard_refuse_answer}
+            return
+        if final_refs:
+            yield {"type": "references", "content": final_refs}
+
+        llm_resp = result.get("llm_response", {})
+        iterator = llm_resp.get("response_iterator")
+        if iterator is not None:
+            async for chunk in iterator:
+                if chunk:
+                    yield {"type": "token", "content": chunk}
+        else:
+            content = llm_resp.get("content", "")
+            if content:
+                yield {"type": "token", "content": content}
+            else:
+                yield {"type": "refuse", "content": settings.hard_refuse_answer}
+    finally:
+        await pool.release(book)
 
 
 def cypher_query(cypher: str, book: str | None = None) -> list[dict]:
