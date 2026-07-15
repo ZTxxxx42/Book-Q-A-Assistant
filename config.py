@@ -9,21 +9,38 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Qdrant 跑在本地 Docker，必须绕过系统代理（如 FlClash），否则 requests 走代理返回 502。
+_no_proxy = os.environ.get("NO_PROXY", "")
+for _h in ("localhost", "127.0.0.1"):
+    if _h not in _no_proxy:
+        _no_proxy = f"{_no_proxy},{_h}" if _no_proxy else _h
+os.environ["NO_PROXY"] = _no_proxy
+os.environ["no_proxy"] = _no_proxy
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data" / "books"
 
 
 @dataclass
 class Settings:
-    # --- LLM ---
+    # --- LLM（本地 Ollama，OpenAI 兼容）---
     llm_binding: str = field(default_factory=lambda: os.getenv("LLM_BINDING", "openai"))
     llm_api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", ""))
     llm_base_url: str | None = field(
         default_factory=lambda: os.getenv("LLM_BASE_URL") or None
     )
-    llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    llm_model: str = field(
+        default_factory=lambda: os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
+    )
+    llm_streaming: bool = field(
+        default_factory=lambda: os.getenv("LLM_STREAMING", "true").lower() == "true"
+    )
+    # LightRAG LLM 并发；Ollama 默认 OLLAMA_NUM_PARALLEL=1，故默认 1。
+    llm_model_max_async: int = field(
+        default_factory=lambda: int(os.getenv("LLM_MODEL_MAX_ASYNC", "1"))
+    )
 
-    # --- Embedding ---
+    # --- Embedding（SiliconFlow /v1/embeddings，OpenAI 兼容）---
     embedding_binding: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_BINDING", "openai")
     )
@@ -36,20 +53,23 @@ class Settings:
     )
     embedding_dim: int = field(default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1024")))
 
-    # --- Rerank（本地 bge-reranker）---
+    # --- Rerank（SiliconFlow /v1/rerank，非 OpenAI 兼容）---
     rerank_model: str = field(
         default_factory=lambda: os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+    )
+    rerank_api_key: str = field(default_factory=lambda: os.getenv("RERANK_API_KEY", ""))
+    rerank_base_url: str | None = field(
+        default_factory=lambda: os.getenv("RERANK_BASE_URL") or None
     )
     enable_rerank: bool = field(
         default_factory=lambda: os.getenv("ENABLE_RERANK", "true").lower() == "true"
     )
-    llm_streaming: bool = field(
-        default_factory=lambda: os.getenv("LLM_STREAMING", "true").lower() == "true"
-    )
 
-    # --- Milvus 向量库 ---
-    milvus_uri: str = field(
-        default_factory=lambda: os.getenv("MILVUS_URI", "rag_storage/milvus_lite.db")
+    # --- 向量库：Qdrant（Docker 容器，真 cosine）---
+    # LightRAG 的 QdrantVectorDBStorage 从 QDRANT_URL / QDRANT_API_KEY 环境变量读取连接。
+    qdrant_url: str = field(default_factory=lambda: os.getenv("QDRANT_URL", "http://localhost:16333"))
+    qdrant_api_key: str | None = field(
+        default_factory=lambda: os.getenv("QDRANT_API_KEY") or None
     )
 
     # --- Neo4j ---
@@ -65,24 +85,9 @@ class Settings:
     chunk_overlap: int = field(default_factory=lambda: int(os.getenv("CHUNK_OVERLAP", "100")))
     language: str = field(default_factory=lambda: os.getenv("LANGUAGE", "chinese"))
 
-    # --- 本地模型缓存（bge-m3 / bge-reranker / Qwen 等，集中存项目内）---
-    # MODEL_CACHE_DIR 可为相对名（相对 PROJECT_ROOT）或绝对路径；默认 model_cache/
-    model_cache_dir: Path = field(
-        default_factory=lambda: PROJECT_ROOT / os.getenv("MODEL_CACHE_DIR", "model_cache")
-    )
-
     def ensure_dirs(self) -> None:
         self.working_dir.mkdir(parents=True, exist_ok=True)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
-
-# 重定向模型下载到项目内（须在任何 modelscope / huggingface_hub import 之前生效）。
-# - MODELSCOPE_CACHE：modelscope Config.cache_dir 的 default_factory 读此 env，
-#   标准布局 {cache}/models/{owner}--{name}/snapshots/{rev}/。
-# - HF_HOME / HUGGINGFACE_HUB_CACHE：_resolve_model 在 modelscope 失败时回退 HF，
-#   让 HF 下载也落在项目内而非 ~/.cache/huggingface。
-os.environ.setdefault("MODELSCOPE_CACHE", str(settings.model_cache_dir))
-os.environ.setdefault("HF_HOME", str(settings.model_cache_dir / "hf"))
-os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(settings.model_cache_dir / "hf"))

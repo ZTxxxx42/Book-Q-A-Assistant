@@ -1,7 +1,8 @@
-"""LightRAG + Neo4j + Milvus 集成：构建知识图谱（适配 LightRAG 1.5.x）。
+"""LightRAG + Neo4j + Qdrant 集成：构建知识图谱（适配 LightRAG 1.5.x）。
 
-检索链路：文本分块(重叠)→bge-m3 向量化→Milvus 存储；查询时 LightRAG hybrid
-（向量+图+关键词三路融合）→ bge-reranker 重排 → 本地 vLLM(Qwen2.5-7B) 生成。
+检索链路：文本分块(重叠)→SiliconFlow bge-m3 向量化→Qdrant 存储；查询时
+LightRAG hybrid（向量+图+关键词三路融合）→ SiliconFlow bge-reranker 重排
+→ 本地 Ollama(Qwen2.5-7B-Instruct) 生成。
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from src.loader import load_book, split_into_chunks
 
 
 def _make_llm_func():
-    """构造 LightRAG 的 LLM 调用函数，指向本地 vLLM（OpenAI 兼容）。
+    """构造 LightRAG 的 LLM 调用函数，指向本地 Ollama（OpenAI 兼容）。
 
     支持流式：当 kwargs 含 stream=True 时返回 async generator 逐 token yield，
     让 LightRAG 的 aquery(stream=True) 判定 is_streaming=True、真正流式输出。
@@ -35,8 +36,8 @@ def _make_llm_func():
 
     @retry(
         retry=retry_if_exception_type(RateLimitError),
-        stop=stop_after_attempt(4),
-        wait=wait_exponential(multiplier=1, min=2, max=20),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=2, min=2, max=60),
         reraise=True,
     )
     async def llm_model_func(
@@ -75,7 +76,7 @@ def _make_llm_func():
 async def _stream_completion(
     client: AsyncOpenAI, messages: list[dict], create_kwargs: dict
 ) -> AsyncIterator[str]:
-    """vLLM 流式生成器：逐 delta yield 文本片。"""
+    """Ollama 流式生成器：逐 delta yield 文本片。"""
     resp = await client.chat.completions.create(
         model=settings.llm_model, messages=messages, **create_kwargs
     )
@@ -88,29 +89,20 @@ async def _stream_completion(
 
 
 def _build_rag():
-    """构造已配置 Milvus + Neo4j + 本地 embed/rerank 的 LightRAG 实例。"""
+    """构造已配置 Qdrant + Neo4j + SiliconFlow embed/rerank 的 LightRAG 实例。"""
     import os
 
     # LightRAG 后端从环境变量读取连接信息
     os.environ.setdefault("NEO4J_URI", settings.neo4j_uri)
     os.environ.setdefault("NEO4J_USERNAME", settings.neo4j_username)
     os.environ.setdefault("NEO4J_PASSWORD", settings.neo4j_password)
-
-    # Milvus env 的两难：
-    # - LightRAG check_storage_env_vars 要求 MILVUS_URI / MILVUS_DB_NAME 两个 key 存在
-    # - 但 pymilvus 的 legacy connections 单例在 import 时解析 Config.MILVUS_URI，
-    #   文件路径（milvus-lite）会触发 ConnectionConfigException
-    # 解法：先在 env 缺省时 import pymilvus（单例以空值初始化），再设 env；
-    # milvus_impl 运行时用 os.environ.get 读取（绕过 Config 单例）。
-    import pymilvus  # noqa: F401  —— 触发 connections 单例初始化（env 空，不报错）
-    os.environ.setdefault(
-        "MILVUS_URI", str(settings.working_dir / "milvus_lite.db")
-    )
-    os.environ.setdefault("MILVUS_DB_NAME", "")  # 空串：满足 verify + 跳过 db 操作
+    os.environ.setdefault("QDRANT_URL", settings.qdrant_url)
+    if settings.qdrant_api_key:
+        os.environ.setdefault("QDRANT_API_KEY", settings.qdrant_api_key)
 
     from lightrag import LightRAG
 
-    from src.local_models import make_bge_m3_embedding_func, make_bge_reranker_func
+    from src.remote_models import make_embedding_func, make_reranker_func
 
     settings.ensure_dirs()
 
@@ -118,14 +110,14 @@ def _build_rag():
         working_dir=str(settings.working_dir),
         llm_model_func=_make_llm_func(),
         llm_model_name=settings.llm_model,
-        embedding_func=make_bge_m3_embedding_func(),
-        graph_storage="Neo4JStorage",          # 图存储：Neo4j
-        vector_storage="MilvusVectorDBStorage",  # 向量存储：Milvus（milvus-lite）
-        rerank_model_func=make_bge_reranker_func(),
+        embedding_func=make_embedding_func(),
+        graph_storage="Neo4JStorage",              # 图存储：Neo4j
+        vector_storage="QdrantVectorDBStorage",    # 向量存储：Qdrant（Docker 容器，真 cosine）
+        rerank_model_func=make_reranker_func(),
         chunk_token_size=settings.chunk_size,
         chunk_overlap_token_size=settings.chunk_overlap,
         entity_extract_max_gleaning=2,
-        llm_model_max_async=4,
+        llm_model_max_async=settings.llm_model_max_async,
         max_parallel_insert=2,
         addon_params={"language": settings.language},
     )

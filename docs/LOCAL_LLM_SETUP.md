@@ -1,202 +1,81 @@
-# 本地 LLM 部署：vLLM（Docker 推荐 / WSL2 备选）
+# 部署指南：Ollama（本地 LLM）+ SiliconFlow（Embedding/Rerank API）
 
-本项目问答生成走本地 vLLM（Qwen2.5-7B-Instruct-AWQ 量化版，适配 RTX 4060 8GB）。
-vLLM 在 Windows 原生不支持，两条路：**Docker Desktop（推荐，已有 WSL2 backend 即可）** 或 WSL2 内 pip 装。
-bge-m3 / bge-reranker 在 Windows 原生 GPU 跑（miniforge `my_env`，Python 3.12 + CUDA torch），不依赖 WSL2。
+本项目问答生成走本地 **Ollama**（Qwen2.5-7B-Instruct，OpenAI 兼容，GPU 推理）；
+embedding 与 rerank 走 **SiliconFlow（硅基流动）** API，不占用本地 GPU。
+向量库用 **Qdrant**（Docker 容器，真 cosine）；KV 缓存与文档状态仍用 LightRAG 原生 JSON 落 `working_dir`。
 
-## 端口约定
+## 端口
 
-| 服务 | 端口 | 说明 |
-|------|------|------|
-| vLLM（Docker 容器） | 8001 | OpenAI 兼容 API（容器内 8000 → 宿主 8001） |
-| FastAPI | 8010 | 本项目接口（避开 8000 幽灵占用） |
-| Neo4j | 7687 | 已有 |
+| 服务 | 端口 |
+|------|------|
+| Ollama（OpenAI 兼容 API） | 11434 |
+| FastAPI | 8010 |
+| Neo4j Bolt / Browser | 7687 / 7474 |
+| Qdrant HTTP / gRPC | 16333 / 16334 |
 
-## bge GPU 环境（miniforge my_env）
+> Qdrant 用 16333 而非默认 6333：6333/6334 落在 Windows Hyper-V 保留端口段，Docker bind 会失败。
 
-bge-m3 / bge-reranker 跑在 miniforge 的 `my_env`（**不是** 项目根的 `.venv`）。
-`.venv` 是 Python 3.14，无 CUDA torch wheel，bge 只能 CPU。
+## 1. Ollama（本地 Qwen LLM）
 
-- 环境路径：`D:\miniforge\envs\my_env`（Python 3.12.13 + torch 2.9.1+cu130，`cuda.is_available()=True`）
-- 启动项目一律用：`D:/miniforge/envs/my_env/python.exe -m uvicorn src.api:app --port 8010 --host 127.0.0.1`
-
-### my_env 配置坑（已处理）
-
-1. **conda 包无 dist-info**：`importlib.metadata.version()` 返回 None → transformers/sentence_transformers 版本检测抛 `found=None`。解法：`my_env/Lib/site-packages/sitecustomize.py` 加 `__version__` 回退 patch（环境级，不进项目仓库）。
-2. **torch 2.9 `_dynamo` 缺 optree**：`pip install optree`。
-3. **packaging 被 conda 装坏**：手动删 `site-packages/packaging*` 后 `pip install packaging==25.0` 补 dist-info。
-4. **fastapi/starlette 版本对齐**：`pip install -U fastapi starlette` 到 fastapi 0.139 + starlette 1.x，对齐 sse-starlette 要求（starlette 0.47 移除 `on_startup`，旧 fastapi 会报 `Router.__init__() got unexpected on_startup`）。
-5. **pymilvus 必须 3.0.0**：conda 默认拉 2.5.14，与 milvus-lite 3.0 的 proto 不匹配，向量搜索抛
-   `AttributeError: function_score`（被 LightRAG 捕获后 `aquery` 返回 None → `/chat` SSE 报
-   `'async for' requires __aiter__, got NoneType`）。`pip install --no-deps --ignore-installed pymilvus==3.0.0`
-   与 .venv 对齐。
-6. **numpy 必须 pip 重装 2.5.1**：conda 构建的 numpy 2.5.1 把 MKL/BLAS DLL 放在
-   `my_env/Library/bin`（`libblas.dll`/`mkl_*.dll`/`libiomp5md.dll`），直接调 `python.exe`（未 `conda activate`）
-   时 `Library/bin` 不在 PATH → numpy 延迟加载 BLAS DLL 失败 → 大矩阵 matmul 触发
-   `Windows fatal exception: code 0xc06d007f`（小矩阵不走 BLAS 故节点搜索能过、边搜索崩溃，日志停在 `Query edges`）。
-   `pip install --no-deps --ignore-installed numpy==2.5.1`（PyPI 同版本，ABI 不变；pip wheel 自带
-   `scipy-openblas` 打包在 numpy 包内，自包含）。验证：`numpy.show_config()` 的 `blas.name` 应为
-   `scipy-openblas`（非 `blas`/MKL）；`np.random.rand(512,1024)@np.random.rand(1024,64)` 不崩。
-
-## 方案 A（推荐）：Docker 跑 vLLM
-
-前提：Docker Desktop + WSL2 backend 已装（GPU 直通需 Windows 11 + NVIDIA 驱动，已满足）。
-
-### A.1 拉镜像
+安装 Ollama：https://ollama.com/download （Windows 版）。安装后：
 
 ```powershell
-docker pull vllm/vllm-openai:latest
+ollama pull qwen2.5:7b-instruct    # ~4.7GB，RTX 4060 8GB 足够
+ollama serve                       # 后台常驻，OpenAI API 在 http://localhost:11434/v1
+# 验证：
+curl http://localhost:11434/v1/models
 ```
 
-### A.2 启动 vLLM 容器（GPU + ModelScope 复用项目内缓存）
+- Ollama 自动用 GPU 推理（CPU 回退）。
+- 默认 `OLLAMA_NUM_PARALLEL=1`，故 `.env` 设 `LLM_MODEL_MAX_ASYNC=1`。需要并发时启动 Ollama 前设 `$env:OLLAMA_NUM_PARALLEL=2`（注意 8GB 显存需容纳 2 路 Qwen 上下文）。
 
-模型缓存已集中到项目内 `book_knowledge_graph/model_cache/`（由 `config.model_cache_dir` / `MODELSCOPE_CACHE` 控制，详见 `config.py`）。容器挂载该目录到 `/root/.cache/modelscope` 即可复用 Qwen AWQ。
+## 2. SiliconFlow（Embedding + Rerank API）
+
+1. 注册 https://siliconflow.cn 获取 API Key。
+2. 填入 `.env` 的 `EMBEDDING_API_KEY` 与 `RERANK_API_KEY`（通常同一个 key）。
+3. 模型：
+   - embedding：`BAAI/bge-m3`（1024 维）
+   - rerank：`BAAI/bge-reranker-v2-m3`
+4. 端点：`https://api.siliconflow.cn/v1`（embedding 走 `/embeddings` OpenAI 兼容；rerank 走 `/rerank` 专用端点）。
+
+> 国内直连、有免费额度。本小书 ingest 一次的 embedding/rerank 费用极低。
+
+## 3. Neo4j + Qdrant（Docker）
 
 ```powershell
-docker run -d --gpus all --name book-vllm -p 8001:8000 `
-  -v D:/PythonProject1/book_knowledge_graph/model_cache:/root/.cache/modelscope `
-  -e VLLM_USE_MODELSCOPE=True `
-  vllm/vllm-openai:latest `
-  --model Qwen/Qwen2.5-7B-Instruct-AWQ `
-  --served-model-name Qwen2.5-7B-Instruct `
-  --max-model-len 4096 `
-  --gpu-memory-utilization 0.85 `
-  --quantization awq
+docker compose up -d      # 同时启动 neo4j + qdrant
 ```
 
-- 首次启动自动从 ModelScope 下载 AWQ 模型（~5GB），挂载宿主缓存后续复用。
-- `--gpu-memory-utilization 0.85` 预留 ~1.2GB 给同卡运行的 bge-m3/reranker。
-- 若 7B AWQ 仍 OOM：换 `Qwen/Qwen2.5-3B-Instruct`（去掉 `--quantization awq`，`--max-model-len 8192`）。
-- 看日志：`docker logs -f book-vllm`，出现 `Uvicorn running on http://0.0.0.0:8000` 即就绪。
+- Neo4j Browser：http://localhost:7474 ，用 `neo4j / bookgraph123` 登录查看图谱。
+- Qdrant Dashboard：http://localhost:16333/dashboard 查看 collection。
+- 数据持久化在 docker volume（`neo4j_data`、`qdrant_data`），容器删除不丢数据。
 
-### A.3 验证
+> 若 Qdrant 启动报 `ports are not available ... 6333`，说明宿主端口被占用——确认 compose 映射到 16333。
+
+## 4. 配置 `.env`
 
 ```bash
-curl http://localhost:8001/v1/models   # 应返回 Qwen2.5-7B-Instruct
+cp .env.example .env
+# 填入 SiliconFlow key（EMBEDDING_API_KEY / RERANK_API_KEY）
 ```
 
-### A.4 常用运维
+## 5. 安装依赖
 
 ```powershell
-docker stop book-vllm      # 停
-docker start book-vllm     # 起（已创建后）
-docker logs -f book-vllm   # 看日志
-docker rm -f book-vllm     # 删除容器
+D:/miniforge/envs/my_env/python.exe -m pip install -r requirements.txt
 ```
 
----
+## 6. 启动验证
 
-## 方案 B（备选）：WSL2 内 pip 装 vLLM
-
-Docker GPU 直通受阻时用此路。
-
-### B.1 安装 WSL2 + Ubuntu
-
-以**管理员**身份开 PowerShell：
 ```powershell
-wsl --install -d Ubuntu
-```
-重启后设 Ubuntu 用户名密码。确认 WSL2（非 WSL1）：
-```powershell
-wsl -l -v   # VERSION 列应为 2
-```
+# 冒烟（5 项全过才继续）
+D:/miniforge/envs/my_env/python.exe scripts/smoke_remote_models.py
 
-## 2. WSL 内装 CUDA toolkit
-
-Windows 侧已装 NVIDIA 驱动即可，WSL 复用同一驱动，**不要**在 WSL 里装 Windows 驱动。
-WSL 内装 CUDA 12.x toolkit（vLLM 需要）：
-```bash
-wget https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb
-sudo dpkg -i cuda-keyring_1.1-1_all.deb
-sudo apt-get update
-sudo apt-get -y install cuda-toolkit-12-4
-echo 'export PATH=/usr/local/cuda/bin:$PATH' >> ~/.bashrc
-echo 'export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
-source ~/.bashrc
-nvidia-smi   # 应显示 RTX 4060
+# 启动 API
+D:/miniforge/envs/my_env/python.exe -m uvicorn src.api:app --port 8010 --host 127.0.0.1
+curl http://localhost:8010/health
 ```
 
-## 3. WSL 内装 vLLM
+## 排错
 
-```bash
-sudo apt-get install -y python3.11 python3.11-venv
-python3.11 -m venv ~/vllm-env
-source ~/vllm-env/bin/activate
-pip install --upgrade pip
-pip install vllm
-```
-
-## 4. 启动 vLLM 服务
-
-国内用 hf-mirror 加速下载模型（Qwen2.5-7B-Instruct ~5GB）：
-```bash
-export HF_ENDPOINT=https://hf-mirror.com
-vllm serve Qwen/Qwen2.5-7B-Instruct \
-  --port 8001 \
-  --max-model-len 8192 \
-  --gpu-memory-utilization 0.85 \
-  --served-model-name Qwen2.5-7B-Instruct
-```
-首次启动会自动下载模型。看到 `Uvicorn running on http://0.0.0.0:8001` 即就绪。
-
-## 5. 验证（Windows 侧）
-
-WSL2 默认把 localhost 转发到 Windows，直接在 Windows 测：
-```bash
-curl http://localhost:8001/v1/models
-```
-应返回含 `Qwen2.5-7B-Instruct` 的 JSON。
-
-## 6. 配置 .env
-
-项目根 `.env`（已 gitignore）：
-```env
-LLM_BINDING=openai
-LLM_API_KEY=token-abc
-LLM_BASE_URL=http://localhost:8001/v1
-LLM_MODEL=Qwen2.5-7B-Instruct
-LLM_STREAMING=true
-
-EMBEDDING_MODEL=BAAI/bge-m3
-EMBEDDING_DIM=1024
-RERANK_MODEL=BAAI/bge-reranker-v2-m3
-ENABLE_RERANK=true
-COSINE_THRESHOLD=1.0
-# 注意：MILVUS_URI 不要写进 .env（pymilvus Config 在 import 时解析会触发 ConnectionConfigException，
-#   由 graph_builder._build_rag 在 import pymilvus 后用 os.environ.setdefault 设置）
-
-NEO4J_URI=bolt://localhost:7687
-NEO4J_USERNAME=neo4j
-NEO4J_PASSWORD=bookgraph123
-LANGUAGE=chinese
-```
-
-## 7. 本地 embedding/rerank 模型下载
-
-bge-m3 / bge-reranker 在 Windows 原生跑，由 `src/local_models._resolve_model` 走 **ModelScope** 下载（HF mirror 元数据头缺失，见坑 2），缓存集中存放在项目内 `book_knowledge_graph/model_cache/models/{owner}--{name}/snapshots/{rev}/`（由 `config.model_cache_dir` + `MODELSCOPE_CACHE` env 控制，HF 回退走 `model_cache/hf/`）。`.gitignore` 已忽略该目录。
-模型约 2.6GB（bge-m3 ~2.2GB + bge-reranker-v2-m3 ~568MB）。
-
-## 8. 启动验证
-
-```bash
-# Windows 侧
-python -m uvicorn src.api:app --port 8010 --host 127.0.0.1
-```
-- `curl http://localhost:8010/health`
-- `curl -N -X POST http://localhost:8010/chat -H "Content-Type: application/json" -d '{"question":"有哪些主要角色？","mode":"hybrid"}'`
-  应逐 token 流出。
-
-## 退路
-
-若 WSL2+vLLM 部署受阻，临时把 `.env` 的 `LLM_BASE_URL` 改回智谱云端、`LLM_MODEL=glm-4-flash`，
-其余链路（Milvus + rerank + 图）照常验证，不阻塞开发。当前 demo 即处于此状态：智谱 GLM 流式生成 + 本地 bge embed/rerank + Milvus + Neo4j，全链路验证通过。
-
-## 实测坑（Windows + Python 3.14 + milvus-lite）
-
-1. **CUDA torch 无 3.14 wheel**：`pip install torch --index-url .../cu121` 在 Python 3.14 下 no-op（无匹配 distribution）。bge-m3/reranker 暂跑 CPU（小数据可接受）。需 GPU 加速建议用 Python 3.11/3.12 venv。
-2. **HF mirror 元数据头缺失**：`HF_ENDPOINT=https://hf-mirror.com` 下，新版 `huggingface_hub` 的 HEAD 响应缺 `X-Repo-Commit` 头，报 `FileMetadataError: Distant resource does not seem to be on huggingface.co`。改用 **ModelScope**（`src/local_models._resolve_model` 已自动走 modelscope）。
-3. **pymilvus Config import 解析 MILVUS_URI**：pymilvus 的 legacy `connections` 单例在 `import pymilvus` 时读 `MILVUS_URI` env 并解析，文件路径（milvus-lite）触发 `ConnectionConfigException`。**解法**：先 `import pymilvus`（env 缺省），再设 `MILVUS_URI=文件路径`（milvus_impl 运行时用 `os.environ.get` 读，绕过 Config 单例）。`graph_builder._build_rag` 已如此处理。**不要**把 `MILVUS_URI` 写进 `.env`（会被 pymilvus Config 在 import 时读到）。
-4. **milvus-lite range search radius 语义反转**：milvus-lite 的 range search 保留 `distance <= radius`（L2 语义），但 COSINE 相似度是越大越好。LightRAG 默认 `COSINE_THRESHOLD=0.2` 会过滤掉所有结果（相似度 0.4+ > 0.2 被丢弃）。**解法**：`.env` 设 `COSINE_THRESHOLD=1.0` 等效禁用下限过滤，`top_k` 仍限制数量。
-5. **milvus-lite drop_collection Windows rename 竞态**：`drop_collection` 在 Windows 上 `manifest.json.tmp -> manifest.json` 报 WinError 183。清理时用 `shutil.rmtree(db_dir)` 代替。LightRAG 全新 ingest 不触发 drop，无影响；schema 迁移时可能遇到。
-6. **FlagReranker 与新版 transformers 不兼容**：`FlagEmbedding.FlagReranker.compute_score` 调 `tokenizer.prepare_for_model`（新版 transformers 已移除）。改用 `sentence_transformers.CrossEncoder`（bge-reranker 兼容），sigmoid 归一化分数到 (0,1) 避免 `min_rerank_score=0` 过滤。
-
+历史问题（本地 bge + milvus 栈时期）与迁移迭代过程见 `TROUBLESHOOTING.md`。

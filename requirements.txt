@@ -5,19 +5,11 @@ tenacity>=8.2.0
 tiktoken>=0.7.0
 numpy>=1.24.0
 
-# 向量库：Milvus（milvus-lite 单独装，pymilvus 不含 lite）
-pymilvus>=2.4.0
-milvus-lite>=2.4.0
+# 向量库：Qdrant（Docker 容器部署，LightRAG 原生 QdrantVectorDBStorage）
+qdrant-client>=1.12.0,<1.13.0
 
-# 本地 embedding（bge-m3，FlagEmbedding）/ rerank（bge-reranker-v2-m3，CrossEncoder）
-FlagEmbedding>=1.2.0
-sentence-transformers>=3.0.0
-torch>=2.2.0
-transformers>=4.40.0
-
-# 模型下载：国内走 ModelScope（HF mirror 缺新版 huggingface_hub 所需元数据头）
-modelscope>=1.38.0
-
+# HTTP 客户端（rerank 调 SiliconFlow /v1/rerank，非 OpenAI 兼容）
+httpx>=0.27.0
 
 # 书籍加载
 pypdf>=4.0.0
