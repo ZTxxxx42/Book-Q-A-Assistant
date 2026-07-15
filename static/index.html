@@ -9,7 +9,7 @@
   :root {
     --bg: #0f1419; --panel: #1a2029; --border: #2a3340;
     --text: #e4e7eb; --muted: #8b95a5; --accent: #4ea1ff;
-    --accent2: #36cfc9; --danger: #ff7875;
+    --accent2: #36cfc9; --danger: #ff7875; --ok: #95de64;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -38,24 +38,55 @@
   button:hover { opacity: .88; }
   button.secondary { background: var(--panel); border: 1px solid var(--border); color: var(--text); }
   button.secondary:hover { border-color: var(--accent); }
+  button.danger { background: var(--danger); }
+  button.sm { padding: 4px 10px; font-size: 12px; }
   main { flex: 1; display: flex; overflow: hidden; }
   #chart { flex: 1; height: 100%; }
   #side {
-    width: 340px; background: var(--panel); border-left: 1px solid var(--border);
-    padding: 18px; overflow-y: auto; flex-shrink: 0;
+    width: 360px; background: var(--panel); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden;
   }
+  .tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .tab {
+    flex: 1; padding: 10px; text-align: center; cursor: pointer; font-size: 13px;
+    color: var(--muted); border-bottom: 2px solid transparent; transition: .15s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-pane { display: none; padding: 16px; overflow-y: auto; flex: 1; }
+  .tab-pane.active { display: block; }
   #side h2 { font-size: 14px; color: var(--accent2); margin-bottom: 12px; }
   .stat { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
   .stat span:last-child { color: var(--text); font-weight: 600; }
   .node-info { margin-top: 16px; }
   .node-info .name { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
-  .node-info .label { display: inline-block; background: var(--bg); color: var(--accent2); font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-bottom: 10px; }
+  .node-info .label { display: inline-block; background: var(--bg); color: var(--accent2); font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-bottom: 8px; }
+  .node-info .desc { font-size: 12px; color: var(--muted); line-height: 1.5; margin-bottom: 8px; max-height: 120px; overflow-y: auto; }
   .edge-list { margin-top: 8px; }
   .edge-item { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; cursor: pointer; }
   .edge-item:hover { color: var(--accent); }
   .edge-item .type { color: var(--accent2); }
   .muted { color: var(--muted); font-size: 12px; }
   .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 14px; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; padding: 3px 8px; background: var(--bg); border-radius: 10px; cursor: pointer; border: 1px solid transparent; }
+  .legend-item.disabled { opacity: .35; text-decoration: line-through; }
+  .legend-dot { width: 9px; height: 9px; border-radius: 50%; }
+
+  .doc-item { padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; font-size: 12px; }
+  .doc-item .doc-name { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .doc-item .doc-meta { color: var(--muted); margin-bottom: 6px; }
+  .doc-item .doc-actions { display: flex; gap: 6px; }
+  .status-tag { font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 6px; }
+  .status-tag.processed { background: var(--ok); color: var(--bg); }
+  .status-tag.failed { background: var(--danger); color: #fff; }
+  .status-tag.processing { background: var(--accent); color: #fff; }
+
+  #cypher-input { width: 100%; min-height: 70px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 12px; font-family: monospace; resize: vertical; }
+  .cypher-table { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 10px; }
+  .cypher-table th, .cypher-table td { border: 1px solid var(--border); padding: 4px 6px; text-align: left; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cypher-table th { color: var(--accent2); }
+
   #query-box {
     background: var(--panel); border-top: 1px solid var(--border);
     padding: 12px 20px; display: flex; flex-direction: column; gap: 10px;
@@ -67,24 +98,36 @@
   .msg.user { background: var(--bg); align-self: flex-end; max-width: 80%; border: 1px solid var(--border); }
   .msg.assistant { background: rgba(78,161,255,.12); align-self: flex-start; max-width: 88%; }
   .msg .role { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+  .msg .refs { margin-top: 6px; font-size: 11px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 4px; }
   .chat-input-row { display: flex; gap: 10px; align-items: center; }
   .chat-input-row input { flex: 1; }
   #query-box input, #query-box select {
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 7px 11px; font-size: 13px; outline: none;
   }
-  .badge { background: var(--accent2); color: var(--bg); font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 6px; }
-  .answer { background: var(--bg); border-radius: 6px; padding: 10px 12px; margin-top: 8px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; max-height: 200px; overflow-y: auto; }
+
+  #toast {
+    position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px;
+  }
+  .toast {
+    background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    color: var(--text); padding: 10px 14px; border-radius: 6px; font-size: 13px; max-width: 320px;
+    box-shadow: 0 4px 12px rgba(0,0,0,.4); animation: slidein .2s ease;
+  }
+  .toast.error { border-left-color: var(--danger); }
+  .toast.ok { border-left-color: var(--ok); }
+  @keyframes slidein { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 </style>
 </head>
 <body>
+  <div id="toast"></div>
   <header>
     <h1>📚 <span>书籍知识图谱</span></h1>
     <div class="controls">
       <input type="text" id="entity-input" placeholder="输入实体名称（模糊）" />
       <select id="depth">
         <option value="1">1 跳</option>
-        <option value="2">2 跳</option>
+        <option value="2" selected>2 跳</option>
         <option value="3">3 跳</option>
       </select>
       <button id="search-btn">🔍 查找子图</button>
@@ -96,13 +139,45 @@
   <main>
     <div id="chart"></div>
     <aside id="side">
-      <h2>图谱概览</h2>
-      <div class="stat"><span>节点数</span><span id="stat-nodes">—</span></div>
-      <div class="stat"><span>关系数</span><span id="stat-edges">—</span></div>
-      <div class="stat"><span>总节点(Neo4j)</span><span id="stat-total">—</span></div>
-      <div class="stat"><span>总关系(Neo4j)</span><span id="stat-total-rel">—</span></div>
-      <div class="node-info" id="node-info">
-        <p class="empty">点击节点查看详情<br/>或搜索一个实体开始</p>
+      <div class="tabs">
+        <div class="tab active" data-tab="overview">图谱概览</div>
+        <div class="tab" data-tab="docs">文档管理</div>
+        <div class="tab" data-tab="cypher">Cypher</div>
+      </div>
+
+      <div class="tab-pane active" id="pane-overview">
+        <h2>统计</h2>
+        <div class="stat"><span>当前画布节点</span><span id="stat-nodes">—</span></div>
+        <div class="stat"><span>当前画布关系</span><span id="stat-edges">—</span></div>
+        <div class="stat"><span>Neo4j 总节点</span><span id="stat-total">—</span></div>
+        <div class="stat"><span>Neo4j 总关系</span><span id="stat-total-rel">—</span></div>
+        <h2 style="margin-top:16px;">类型图例（点击过滤）</h2>
+        <div class="legend" id="legend"></div>
+        <div class="node-info" id="node-info">
+          <p class="empty">点击节点查看详情<br/>或搜索一个实体开始</p>
+        </div>
+      </div>
+
+      <div class="tab-pane" id="pane-docs">
+        <h2>导入新书</h2>
+        <div style="display:flex;gap:8px;margin-bottom:14px;">
+          <input type="text" id="doc-file" placeholder="data/books 下文件名" style="flex:1;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px 11px;font-size:13px;" />
+          <button class="secondary sm" id="doc-ingest">导入</button>
+          <button class="secondary sm" id="doc-upsert">Upsert</button>
+        </div>
+        <div class="muted" style="margin-bottom:10px;">Upsert = 同名已存在则先删后导（用于更新内容）</div>
+        <h2>已导入文档</h2>
+        <div id="doc-list"></div>
+      </div>
+
+      <div class="tab-pane" id="pane-cypher">
+        <h2>Cypher 查询（只读）</h2>
+        <textarea id="cypher-input" placeholder="MATCH (n) RETURN labels(n)[0] AS label, count(*) AS cnt"></textarea>
+        <div style="margin-top:8px;">
+          <button class="secondary sm" id="cypher-run">▶ 执行</button>
+          <span class="muted" id="cypher-status" style="margin-left:8px;"></span>
+        </div>
+        <div id="cypher-result"></div>
       </div>
     </aside>
   </main>
@@ -116,6 +191,9 @@
         <option value="global">global</option>
         <option value="naive">naive</option>
       </select>
+      <select id="q-book">
+        <option value="">不限书籍</option>
+      </select>
       <input type="text" id="q-input" placeholder="基于图谱提问，支持多轮对话…" />
       <button id="q-btn">💬 提问</button>
       <button class="secondary" id="q-clear">清空对话</button>
@@ -123,11 +201,21 @@
   </div>
 
 <script>
-const API = ""; // 同源；跨域时填后端地址如 http://localhost:8000
+const API = ""; // 同源；跨域时填后端地址
 const chart = echarts.init(document.getElementById("chart"), "dark");
-let currentNodes = [], currentEdges = [];
+let currentNodes = [], currentEdges = [], disabledLabels = new Set();
 
-// 标签 → 颜色
+// ---------- toast ----------
+function toast(msg, kind = "") {
+  const wrap = document.getElementById("toast");
+  const t = document.createElement("div");
+  t.className = "toast " + kind;
+  t.textContent = msg;
+  wrap.appendChild(t);
+  setTimeout(() => { t.style.opacity = "0"; t.style.transition = "opacity .3s"; setTimeout(() => t.remove(), 300); }, 3500);
+}
+
+// ---------- 标签颜色 ----------
 const PALETTE = ["#4ea1ff","#36cfc9","#ffd666","#ff9c6e","#b37feb","#5cdbd3","#ff85c0","#95de64","#ffc069"];
 function colorFor(label) {
   let h = 0;
@@ -135,22 +223,25 @@ function colorFor(label) {
   return PALETTE[h % PALETTE.length];
 }
 
-// 加载子图到画布
+// ---------- 渲染子图 ----------
 function render(sub) {
   currentNodes = sub.nodes || [];
   currentEdges = sub.edges || [];
   document.getElementById("stat-nodes").textContent = currentNodes.length;
   document.getElementById("stat-edges").textContent = currentEdges.length;
 
-  const nodes = currentNodes.map(n => ({
-    id: n.id,
-    name: n.name || n.id,
+  const visibleNodes = currentNodes.filter(n => !disabledLabels.has(n.label));
+  const visibleIds = new Set(visibleNodes.map(n => n.id));
+  const visibleEdges = currentEdges.filter(e => visibleIds.has(e.source) && visibleIds.has(e.target));
+
+  const nodes = visibleNodes.map(n => ({
+    id: n.id, name: n.name || n.id,
     symbolSize: Math.min(60, (n.degree || 1) * 4 + 18),
     itemStyle: { color: colorFor(n.label) },
     label: { show: true, color: "#e4e7eb", fontSize: 12 },
     raw: n,
   }));
-  const links = currentEdges.map(e => ({
+  const links = visibleEdges.map(e => ({
     source: e.source, target: e.target,
     label: { show: false, formatter: e.type, fontSize: 10, color: "#8b95a5" },
     lineStyle: { color: "#3a4452", width: 1, curveness: 0.1 },
@@ -179,32 +270,30 @@ function render(sub) {
   }, true);
 }
 
-// 点击节点 → 显示详情 + 可展开
-chart.on("click", async (p) => {
-  if (p.dataType !== "node") return;
-  const n = p.data.raw;
-  showNodeInfo(n);
-});
+// ---------- 节点详情 ----------
+chart.on("click", (p) => { if (p.dataType === "node") showNodeInfo(p.data.raw); });
 
 function showNodeInfo(n) {
   const edges = currentEdges.filter(e => e.source === n.id || e.target === n.id);
+  const safeName = (n.name || "").replace(/'/g, "\\'");
   const html = `
     <div class="name">${n.name}</div>
     <span class="label">${n.label}</span>
     <div class="muted">度数: ${n.degree}　关联关系: ${edges.length}</div>
+    ${n.description ? `<div class="desc">${n.description}</div>` : ""}
     <h2 style="margin-top:14px;">关联关系</h2>
     <div class="edge-list">
       ${edges.length ? edges.map(e => {
         const other = e.source === n.id ? e.target : e.source;
         const otherNode = currentNodes.find(x => x.id === other);
-        const otherName = otherNode ? otherNode.name : other;
+        const otherName = (otherNode ? otherNode.name : other).replace(/'/g, "\\'");
         return `<div class="edge-item" onclick="expandNode('${otherName}')">
-          <span class="type">[${e.type}]</span> → ${otherName}
+          <span class="type">[${e.type}]</span> → ${otherNode ? otherNode.name : other}
           ${e.description ? `<div class="muted">${e.description}</div>` : ""}
         </div>`;
       }).join("") : '<p class="empty">无关联</p>'}
     </div>
-    <button class="secondary" style="margin-top:12px;width:100%;" onclick="expandNode('${n.name.replace(/'/g,"\\'")}')">以「${n.name}」为中心展开</button>
+    <button class="secondary" style="margin-top:12px;width:100%;" onclick="expandNode('${safeName}')">以「${n.name}」为中心展开</button>
   `;
   document.getElementById("node-info").innerHTML = html;
 }
@@ -214,6 +303,7 @@ window.expandNode = async function(name) {
   await loadSubgraph(name);
 };
 
+// ---------- 子图 / 热门 ----------
 async function loadSubgraph(entity, depth) {
   depth = depth || parseInt(document.getElementById("depth").value);
   try {
@@ -222,12 +312,9 @@ async function loadSubgraph(entity, depth) {
       body: JSON.stringify({ entity, depth, limit: 100 })
     });
     const sub = await r.json();
-    if (!sub.nodes || !sub.nodes.length) {
-      alert("未找到实体：" + entity);
-      return;
-    }
+    if (!sub.nodes || !sub.nodes.length) { toast("未找到实体：" + entity, "error"); return; }
     render(sub);
-  } catch (e) { alert("查询失败：" + e); }
+  } catch (e) { toast("查询失败：" + e, "error"); }
 }
 
 async function loadTop() {
@@ -237,58 +324,169 @@ async function loadTop() {
       body: JSON.stringify({ limit: 40 })
     });
     const sub = await r.json();
-    if (!sub.nodes || !sub.nodes.length) { alert("图谱为空，请先导入书籍"); return; }
-    // 只展示节点，无边
+    if (!sub.nodes || !sub.nodes.length) { toast("图谱为空，请先导入书籍", "error"); return; }
     render({ nodes: sub.nodes, edges: [] });
     document.getElementById("node-info").innerHTML =
       `<h2>热门实体</h2><p class="muted">点击节点查看关联，或输入名称搜索子图。</p>`;
-  } catch (e) { alert("查询失败：" + e); }
+  } catch (e) { toast("查询失败：" + e, "error"); }
 }
 
+// ---------- 统计 + 图例 ----------
 async function loadStats() {
   try {
     const r = await fetch(API + "/stats");
     const s = await r.json();
     document.getElementById("stat-total").textContent = s.total_nodes;
     document.getElementById("stat-total-rel").textContent = s.total_relationships;
+    renderLegend(s.node_counts_by_label || {});
   } catch (e) { /* Neo4j 可能未启动 */ }
 }
 
-// 多轮对话历史（仅前端持有，随请求带上）
+function renderLegend(counts) {
+  const el = document.getElementById("legend");
+  const labels = Object.keys(counts);
+  if (!labels.length) { el.innerHTML = '<span class="muted">无类型数据</span>'; return; }
+  el.innerHTML = labels.map(lbl => {
+    const c = colorFor(lbl);
+    const dis = disabledLabels.has(lbl) ? "disabled" : "";
+    return `<div class="legend-item ${dis}" onclick="toggleLabel('${lbl}')">
+      <span class="legend-dot" style="background:${c}"></span>${lbl} (${counts[lbl]})
+    </div>`;
+  }).join("");
+}
+
+window.toggleLabel = function(lbl) {
+  if (disabledLabels.has(lbl)) disabledLabels.delete(lbl);
+  else disabledLabels.add(lbl);
+  render(currentNodes.length ? { nodes: currentNodes, edges: currentEdges } : { nodes: [], edges: [] });
+  // 刷新图例状态
+  fetch(API + "/stats").then(r => r.json()).then(s => renderLegend(s.node_counts_by_label || {}));
+};
+
+// ---------- 文档管理 ----------
+async function loadDocs() {
+  try {
+    const r = await fetch(API + "/documents");
+    const docs = await r.json();
+    const el = document.getElementById("doc-list");
+    if (!docs.length) { el.innerHTML = '<p class="empty">暂无文档</p>'; return; }
+    el.innerHTML = docs.map(d => {
+      const st = (d.status || "").toLowerCase();
+      return `<div class="doc-item">
+        <div class="doc-name">${d.file_path}<span class="status-tag ${st}">${d.status}</span></div>
+        <div class="doc-meta">${d.chunks_count} chunks · ${new Date((d.created_at||0)*1000).toLocaleString()}</div>
+        <div class="doc-actions">
+          <button class="secondary sm" onclick="refreshDoc('${d.doc_id}','${d.file_path}')">刷新</button>
+          <button class="danger sm" onclick="deleteDoc('${d.doc_id}','${d.file_path}')">删除</button>
+        </div>
+      </div>`;
+    }).join("");
+    // 同步填充书籍下拉
+    const sel = document.getElementById("q-book");
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">不限书籍</option>' +
+      docs.filter(d => d.status === "processed").map(d => `<option value="${d.file_path}">${d.file_path}</option>`).join("");
+    sel.value = cur;
+  } catch (e) { toast("加载文档失败：" + e, "error"); }
+}
+
+async function ingestFile(upsert) {
+  const file = document.getElementById("doc-file").value.trim();
+  if (!file) { toast("请输入文件名", "error"); return; }
+  const url = upsert ? "/documents/upsert" : "/ingest";
+  toast(upsert ? "Upsert 中（可能需数十秒）…" : "导入中…");
+  try {
+    const r = await fetch(API + url, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ file, max_chunks: null })
+    });
+    const data = await r.json();
+    if (!r.ok) { toast((data.detail || "导入失败"), "error"); return; }
+    toast((upsert ? "Upsert 完成" : "导入完成") + "：" + (file), "ok");
+    loadDocs(); loadStats();
+  } catch (e) { toast("导入失败：" + e, "error"); }
+}
+
+window.deleteDoc = async function(docId, name) {
+  if (!confirm(`删除「${name}」？将同步清理其向量与图谱节点。`)) return;
+  try {
+    const r = await fetch(API + "/documents/" + docId, { method: "DELETE" });
+    if (!r.ok) { const e = await r.json(); toast(e.detail || "删除失败", "error"); return; }
+    toast("已删除：" + name, "ok");
+    loadDocs(); loadStats(); loadTop();
+  } catch (e) { toast("删除失败：" + e, "error"); }
+};
+
+window.refreshDoc = async function(docId, name) {
+  toast("刷新中（删旧重导）…");
+  try {
+    const r = await fetch(API + `/documents/${docId}/refresh`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ file: name, max_chunks: null })
+    });
+    if (!r.ok) { const e = await r.json(); toast(e.detail || "刷新失败", "error"); return; }
+    toast("已刷新：" + name, "ok");
+    loadDocs(); loadStats();
+  } catch (e) { toast("刷新失败：" + e, "error"); }
+};
+
+// ---------- Cypher 控制台 ----------
+async function runCypher() {
+  const cy = document.getElementById("cypher-input").value.trim();
+  if (!cy) return;
+  document.getElementById("cypher-status").textContent = "执行中…";
+  try {
+    const r = await fetch(API + "/cypher", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ cypher: cy, limit: 100 })
+    });
+    const data = await r.json();
+    if (!r.ok) { document.getElementById("cypher-status").textContent = ""; toast(data.detail || "执行失败", "error"); return; }
+    const rows = data.rows || [];
+    document.getElementById("cypher-status").textContent = `${rows.length} 行`;
+    if (!rows.length) { document.getElementById("cypher-result").innerHTML = '<p class="empty">无结果</p>'; return; }
+    const cols = Object.keys(rows[0]);
+    document.getElementById("cypher-result").innerHTML =
+      `<table class="cypher-table"><thead><tr>${cols.map(c => `<th>${c}</th>`).join("")}</tr></thead>
+       <tbody>${rows.map(rw => `<tr>${cols.map(c => `<td title="${rw[c]}">${rw[c]}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  } catch (e) { document.getElementById("cypher-status").textContent = ""; toast("执行失败：" + e, "error"); }
+}
+
+// ---------- 多轮问答 ----------
 let chatHistory = [];
 const chatLog = document.getElementById("chat-log");
 
 function addMsg(role, content) {
   const div = document.createElement("div");
   div.className = "msg " + role;
-  div.innerHTML = `<div class="role">${role === "user" ? "🧑 你" : "🤖 助手"}</div><div class="content"></div>`;
+  div.innerHTML = `<div class="role">${role === "user" ? "🧑 你" : "🤖 助手"}</div><div class="content"></div><div class="refs" style="display:none"></div>`;
   div.querySelector(".content").textContent = content;
   chatLog.appendChild(div);
   chatLog.scrollTop = chatLog.scrollHeight;
-  return div.querySelector(".content");
+  return { content: div.querySelector(".content"), refs: div.querySelector(".refs") };
 }
 
 async function askQuestion() {
   const q = document.getElementById("q-input").value.trim();
   if (!q) return;
   const mode = document.getElementById("q-mode").value;
+  const book = document.getElementById("q-book").value || null;
   document.getElementById("q-input").value = "";
 
   addMsg("user", q);
-  const ansEl = addMsg("assistant", "");
-  ansEl.textContent = "思考中…";
+  const els = addMsg("assistant", "");
+  els.content.textContent = "思考中…";
 
   try {
     const resp = await fetch(API + "/chat", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ question: q, mode, history: chatHistory })
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ question: q, mode, history: chatHistory, book })
     });
-    if (!resp.ok) { ansEl.textContent = "请求失败：" + resp.status; return; }
+    if (!resp.ok) { els.content.textContent = "请求失败：" + resp.status; return; }
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
-    let buf = "", answer = "";
+    let buf = "", answer = "", refs = [];
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -298,31 +496,31 @@ async function askQuestion() {
       for (const line of lines) {
         if (!line.startsWith("data: ")) continue;
         const evt = JSON.parse(line.slice(6));
-        if (evt.type === "token") {
-          if (!answer) ansEl.textContent = "";  // 清掉"思考中…"
+        if (evt.type === "references") {
+          refs = evt.content || [];
+        } else if (evt.type === "token") {
+          if (!answer) els.content.textContent = "";
           answer += evt.content;
-          ansEl.textContent = answer;
+          els.content.textContent = answer;
           chatLog.scrollTop = chatLog.scrollHeight;
         } else if (evt.type === "error") {
-          ansEl.textContent = "❌ " + evt.content;
-          return;
-        } else if (evt.type === "done") {
-          break;
-        }
+          els.content.textContent = "❌ " + evt.content; return;
+        } else if (evt.type === "done") { break; }
       }
+    }
+    if (refs.length) {
+      els.refs.style.display = "block";
+      els.refs.innerHTML = "📎 出处：" + refs.map(r => r.file_path).filter((v,i,a)=>a.indexOf(v)===i).join(", ");
     }
     if (answer) {
       chatHistory.push({ role: "user", content: q });
       chatHistory.push({ role: "assistant", content: answer });
-      // 只保留最近 6 轮，避免上下文爆炸
       if (chatHistory.length > 12) chatHistory = chatHistory.slice(-12);
     }
-  } catch (e) {
-    ansEl.textContent = "查询失败：" + e;
-  }
+  } catch (e) { els.content.textContent = "查询失败：" + e; }
 }
 
-// 事件绑定
+// ---------- 事件绑定 ----------
 document.getElementById("search-btn").onclick = () => {
   const v = document.getElementById("entity-input").value.trim();
   if (v) loadSubgraph(v);
@@ -331,12 +529,28 @@ document.getElementById("entity-input").addEventListener("keydown", e => {
   if (e.key === "Enter") document.getElementById("search-btn").click();
 });
 document.getElementById("top-btn").onclick = loadTop;
-document.getElementById("reset-btn").onclick = () => { chart.clear(); loadTop(); };
+document.getElementById("reset-btn").onclick = () => { chart.clear(); disabledLabels.clear(); loadTop(); };
 document.getElementById("q-btn").onclick = askQuestion;
 document.getElementById("q-clear").onclick = () => { chatHistory = []; chatLog.innerHTML = ""; };
-document.getElementById("q-input").addEventListener("keydown", e => {
-  if (e.key === "Enter") askQuestion();
+document.getElementById("q-input").addEventListener("keydown", e => { if (e.key === "Enter") askQuestion(); });
+document.getElementById("doc-ingest").onclick = () => ingestFile(false);
+document.getElementById("doc-upsert").onclick = () => ingestFile(true);
+document.getElementById("cypher-run").onclick = runCypher;
+document.getElementById("cypher-input").addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) runCypher();
 });
+
+// tab 切换
+document.querySelectorAll(".tab").forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll(".tab-pane").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    document.getElementById("pane-" + t.dataset.tab).classList.add("active");
+    if (t.dataset.tab === "docs") loadDocs();
+  };
+});
+
 window.addEventListener("resize", () => chart.resize());
 
 // 初始化

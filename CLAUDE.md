@@ -74,7 +74,7 @@ loader.py ──load_book/split_into_chunks──▶ graph_builder._build_rag() 
 - `src/graph_view.py` — `get_subgraph`/`get_top_entities` for the frontend viz. Knows the Neo4j storage convention: node label = workspace name, entity name in `entity_id` property, edge type is `DIRECTED` with semantics in `description`/`weight`.
 - `src/api.py` — FastAPI app. `/chat` is SSE streaming. `/ingest/async` + `/tasks/{id}` track long ingests in an in-process `_tasks` dict (no DB — lost on restart). `/cypher` allowlists only `MATCH/RETURN/WITH/CALL/UNWIND` prefixes.
 - `main.py` — Click CLI mirroring the API surface.
-- `static/index.html` — served at `/`, the graph viz UI.
+- `static/index.html` — served at `/`, the graph viz UI. Single-file (ECharts + vanilla JS, no build). Three sidebar tabs: **概览** (stats + clickable type legend from `node_counts_by_label` + node detail with description), **文档管理** (`/documents` list + `/ingest` + `/documents/upsert` + refresh + delete), **Cypher** (`/cypher` console with result table). Chat area has a book-scope dropdown (`/chat` with `book`), references rendered under each answer, toast replaces alert.
 
 ## Critical environment notes
 

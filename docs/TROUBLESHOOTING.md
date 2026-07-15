@@ -11,6 +11,14 @@
 - **本地 Qwen 答复稳定性**：query 角色单次答复几百 token，远短于引发崩溃的 8 分钟抽取；若 SSE 异常则改非流式或换 3b。
 - **网络延迟**：每次 query 多 2 个 SiliconFlow RTT（~100-300ms），demo 可接受。
 
+## Resolved（当前轮：阶段 3 前端管理面板）
+
+### 2026-07-15 — 前端缺管理面板，仅图谱+问答
+- **Symptom:** `static/index.html` 只对接 /graph /graph/top /stats /chat，无文档管理、Cypher、按书过滤、引用展示、类型图例。
+- **Fix:** 单文件增量重写——侧栏三 tab（概览/文档/Cypher）、文档管理（/documents + /ingest + /documents/upsert + refresh + delete）、Cypher 控制台、按书下拉（/chat 带 book）、references 事件解析展示、node_counts_by_label 图例过滤、节点 description、toast 替代 alert。`node --check` 通过。
+- **Files:** `static/index.html`。
+- **遗留:** 浏览器交互实测需用户确认；dup-failed 残留文档可见；实体编辑 UI 未加。
+
 ## Resolved（当前轮：阶段 2 多书 + 按书过滤）
 
 ### 2026-07-15 — only_need_context 拿不到结构化 chunks，按书过滤方案失败
