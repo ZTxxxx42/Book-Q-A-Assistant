@@ -37,6 +37,7 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, description="问题")
     mode: QueryMode = Field("hybrid", description="检索模式")
     stream: bool = Field(False, description="流式返回（暂不支持，预留）")
+    book: str | None = Field(None, description="限定书籍文件名（仅在该书 chunk 内作答）")
 
 
 class QueryResponse(BaseModel):
@@ -110,7 +111,7 @@ async def health() -> dict:
 async def query_endpoint(req: QueryRequest) -> QueryResponse:
     """对图谱提问，返回答案 + 引用出处。"""
     try:
-        result = await ask(req.question, mode=req.mode, stream=False)
+        result = await ask(req.question, mode=req.mode, stream=False, book=req.book)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败：{e}")
     return QueryResponse(
@@ -127,6 +128,7 @@ class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1)
     mode: QueryMode = Field("hybrid")
     history: list[ChatMessage] = Field(default_factory=list, description="多轮对话历史")
+    book: str | None = Field(None, description="限定书籍文件名（仅在该书 chunk 内作答）")
 
 
 @app.post("/chat")
@@ -140,7 +142,7 @@ async def chat_endpoint(req: ChatRequest):
 
     async def event_stream():
         try:
-            async for evt in ask_stream(req.question, mode=req.mode, history=history):
+            async for evt in ask_stream(req.question, mode=req.mode, history=history, book=req.book):
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
@@ -189,6 +191,26 @@ async def ingest_async_endpoint(req: IngestRequest) -> dict:
 
     asyncio.create_task(_run())
     return {"task_id": task_id, "status": "running"}
+
+
+class UpsertRequest(BaseModel):
+    file: str = Field(..., description="书籍路径（data/books 下文件名或绝对路径）")
+    max_chunks: int | None = Field(None, description="最多导入块数（测试用）")
+
+
+@app.post("/documents/upsert")
+async def upsert_document_endpoint(req: UpsertRequest) -> dict:
+    """按文件名 upsert：同 basename 已存在则先删后导，不存在则直接导入。"""
+    from src.loader import resolve_book_path
+    from src.maintenance import upsert_document
+
+    path = resolve_book_path(req.file)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"书籍不存在：{path}")
+    try:
+        return await upsert_document(str(path), max_chunks=req.max_chunks)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"upsert 失败：{e}")
 
 
 @app.get("/tasks/{task_id}")

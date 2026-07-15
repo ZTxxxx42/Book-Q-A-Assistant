@@ -92,6 +92,33 @@ async def refresh_document(doc_id: str, file: str, max_chunks: int | None = None
     return {"deleted": deleted, "reingested": info}
 
 
+async def upsert_document(file: str, max_chunks: int | None = None) -> dict:
+    """按文件名 upsert：同 basename 已存在则先删后导，不存在则直接导入。
+
+    LightRAG 的 filename dedup 会拦下同 basename 的重复 ingest，故同书内容变更
+    必须先 delete 再 ingest。本函数封装该"按文件名 upsert"语义。
+    """
+    from pathlib import Path
+
+    from src.graph_builder import ingest_book
+
+    basename = Path(file).name
+    # 查同 basename 的现有文档
+    existing = None
+    for d in await list_documents():
+        if d.get("file_path") == basename:
+            existing = d
+            break
+
+    deleted = None
+    if existing:
+        deleted = await delete_document(existing["doc_id"])
+
+    path = resolve_book_path(file)
+    info = await ingest_book(str(path), max_chunks=max_chunks)
+    return {"deleted": deleted, "reingested": info, "file": basename}
+
+
 # ---------- 实体级 ----------
 
 async def edit_entity(

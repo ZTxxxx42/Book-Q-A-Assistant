@@ -46,6 +46,10 @@ curl -N -X POST http://localhost:8010/chat -H "Content-Type: application/json" \
 
 Query modes: `local` (specific entity/fact), `global` (cross-chapter), `hybrid` (default, recommended), `naive` (plain vector RAG, no graph).
 
+**Per-book filtering**: `/query` and `/chat` accept an optional `book` (filename) field; CLI `query --book <name>`. When set, retrieval bypasses LightRAG and queries the Qdrant chunks collection directly with a `file_path` payload filter + rerank, then generates via the local Qwen with a strict "answer only from this book's context" prompt. Without `book`, the normal LightRAG hybrid retrieval runs cross-DB. See `docs/reports/phase2-multi-book.md`.
+
+**Document upsert**: `POST /documents/upsert` (and `maintenance.upsert_document`) handles same-basename re-ingest — LightRAG's filename dedup blocks plain re-ingest of an changed file, so upsert deletes the existing doc_id first then re-ingests.
+
 ## Architecture
 
 The data flow is linear and lives in `src/`:

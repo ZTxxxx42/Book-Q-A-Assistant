@@ -54,10 +54,12 @@ def ingest(file: str, max_chunks: int | None) -> None:
     default="hybrid",
     help="检索模式",
 )
-def query(question: str, mode: str) -> None:
+@click.option("--book", default=None, help="限定书籍文件名（仅在该书 chunk 内作答）")
+def query(question: str, mode: str, book: str | None) -> None:
     """对图谱提问。"""
-    console.print(f"[cyan]问题[/cyan] ({mode}): {question}")
-    result = asyncio.run(ask(question, mode=mode))  # type: ignore[arg-type]
+    scope = f", book={book}" if book else ""
+    console.print(f"[cyan]问题[/cyan] ({mode}{scope}): {question}")
+    result = asyncio.run(ask(question, mode=mode, book=book))  # type: ignore[arg-type]
     console.print("\n[bold green]回答:[/bold green]")
     console.print(result["answer"])
     refs = result.get("references", [])

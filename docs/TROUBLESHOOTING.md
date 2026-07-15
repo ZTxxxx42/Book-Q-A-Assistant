@@ -11,6 +11,19 @@
 - **本地 Qwen 答复稳定性**：query 角色单次答复几百 token，远短于引发崩溃的 8 分钟抽取；若 SSE 异常则改非流式或换 3b。
 - **网络延迟**：每次 query 多 2 个 SiliconFlow RTT（~100-300ms），demo 可接受。
 
+## Resolved（当前轮：阶段 2 多书 + 按书过滤）
+
+### 2026-07-15 — only_need_context 拿不到结构化 chunks，按书过滤方案失败
+- **Symptom:** 用 `QueryParam(only_need_context=True)` 取上下文后按 `data.chunks` 的 file_path 过滤，但 `data.chunks` 始终为空（0 项），过滤后无 chunk。
+- **Root cause:** LightRAG 1.5.4 在 only_need_context（及正常模式）下把 chunks 合并进 `llm_response.content` 上下文字符串，`data.chunks` 不返回结构化项；`data.references` 仅在 chunk 通过 rerank 时才填充，且只有 reference_id/file_path 无 content。
+- **Fix:** 绕过 LightRAG 检索，`_retrieve_chunks_for_book()` 直接 `qdrant_client.query_points` 查 chunks 集合 + `file_path` payload 过滤，再 rerank + Qwen 自生成。
+- **Files:** `src/query.py`。
+
+### 2026-07-15 — 同书内容变更被 filename dedup 拦下
+- **Symptom:** 同 basename 再 ingest 不更新（LightRAG filename + content_hash 双重 dedup 判重跳过）。
+- **Fix:** `maintenance.upsert_document()` 按 basename 查现有文档，存在则先 `delete_document` 再 `ingest_book`，包成 upsert 语义；API `POST /documents/upsert`。
+- **Files:** `src/maintenance.py`、`src/api.py`。
+
 ## Resolved（当前轮：阶段 1 查询/检索质量优化）
 
 ### 2026-07-15 — /query 非流式 enable_rerank 与 /chat 不对称
