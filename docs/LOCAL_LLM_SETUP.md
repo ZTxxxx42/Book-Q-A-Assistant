@@ -1,8 +1,10 @@
-# 部署指南：Ollama（本地 LLM）+ SiliconFlow（Embedding/Rerank API）
+# 部署指南：GLM 抽取 + Ollama 答复 + SiliconFlow Embed/Rerank + Qdrant
 
-本项目问答生成走本地 **Ollama**（Qwen2.5-7B-Instruct，OpenAI 兼容，GPU 推理）；
-embedding 与 rerank 走 **SiliconFlow（硅基流动）** API，不占用本地 GPU。
-向量库用 **Qdrant**（Docker 容器，真 cosine）；KV 缓存与文档状态仍用 LightRAG 原生 JSON 落 `working_dir`。
+本项目 LLM 按角色分流：
+- **实体抽取 / 关键词抽取** → 远程 **GLM-4.7**（重活，不占本地 GPU）。
+- **最终答复生成** → 本地 **Ollama Qwen2.5-7B-Instruct**（短答复流式，GPU 稳定）。
+
+embedding 与 rerank 走 **SiliconFlow（硅基流动）** API。向量库用 **Qdrant**（Docker 容器，真 cosine）；KV 缓存与文档状态仍用 LightRAG 原生 JSON 落 `working_dir`。
 
 ## 端口
 
@@ -15,7 +17,16 @@ embedding 与 rerank 走 **SiliconFlow（硅基流动）** API，不占用本地
 
 > Qdrant 用 16333 而非默认 6333：6333/6334 落在 Windows Hyper-V 保留端口段，Docker bind 会失败。
 
-## 1. Ollama（本地 Qwen LLM）
+## 1. GLM-4.7（远程抽取 LLM）
+
+1. 注册智谱开放平台 https://open.bigmodel.cn 获取 API Key。
+2. 填入 `.env` 的 `LLM_API_KEY`。
+3. 端点：`https://open.bigmodel.cn/api/paas/v4`（OpenAI 兼容），模型 `glm-4.7`。
+4. 并发 `LLM_MODEL_MAX_ASYNC=2`（避免 429，6 次 retry 兜底）。
+
+> 抽取是 ingest 时的重 LLM 工作。本地 7B 跑抽取会因长持续生成拖崩笔记本 GPU（见 TROUBLESHOOTING），故抽取走远程。
+
+## 2. Ollama（本地 Qwen 答复 LLM）
 
 安装 Ollama：https://ollama.com/download （Windows 版）。安装后：
 
@@ -28,10 +39,11 @@ ollama serve                       # 后台常驻，OpenAI API 在 http://localh
 curl http://localhost:21434/v1/models
 ```
 
-- Ollama 自动用 GPU 推理（CPU 回退）。
-- 默认 `OLLAMA_NUM_PARALLEL=1`，故 `.env` 设 `LLM_MODEL_MAX_ASYNC=1`。需要并发时启动 Ollama 前设 `$env:OLLAMA_NUM_PARALLEL=2`（注意 8GB 显存需容纳 2 路 Qwen 上下文）。
+- 仅用于 `query` 角色（最终答复生成，流式 SSE）。短答复，不会持续满载。
+- 默认 `OLLAMA_NUM_PARALLEL=1`，故 `.env` 设 `QUERY_LLM_MODEL_MAX_ASYNC=1`。
+- `.env` 对应字段：`QUERY_LLM_API_KEY=ollama`、`QUERY_LLM_BASE_URL=http://localhost:21434/v1`、`QUERY_LLM_MODEL=qwen2.5:7b-instruct`。
 
-## 2. SiliconFlow（Embedding + Rerank API）
+## 3. SiliconFlow（Embedding + Rerank API）
 
 1. 注册 https://siliconflow.cn 获取 API Key。
 2. 填入 `.env` 的 `EMBEDDING_API_KEY` 与 `RERANK_API_KEY`（通常同一个 key）。
@@ -42,7 +54,7 @@ curl http://localhost:21434/v1/models
 
 > 国内直连、有免费额度。本小书 ingest 一次的 embedding/rerank 费用极低。
 
-## 3. Neo4j + Qdrant（Docker）
+## 4. Neo4j + Qdrant（Docker）
 
 ```powershell
 docker compose up -d      # 同时启动 neo4j + qdrant
@@ -54,20 +66,21 @@ docker compose up -d      # 同时启动 neo4j + qdrant
 
 > 若 Qdrant 启动报 `ports are not available ... 6333`，说明宿主端口被占用——确认 compose 映射到 16333。
 
-## 4. 配置 `.env`
+## 5. 配置 `.env`
 
 ```bash
 cp .env.example .env
-# 填入 SiliconFlow key（EMBEDDING_API_KEY / RERANK_API_KEY）
+# 填入：LLM_API_KEY（GLM）、EMBEDDING_API_KEY / RERANK_API_KEY（SiliconFlow）
+# QUERY_LLM_* 默认指向本地 Ollama，无需 key
 ```
 
-## 5. 安装依赖
+## 6. 安装依赖
 
 ```powershell
 D:/miniforge/envs/my_env/python.exe -m pip install -r requirements.txt
 ```
 
-## 6. 启动验证
+## 7. 启动验证
 
 ```powershell
 # 冒烟（5 项全过才继续）

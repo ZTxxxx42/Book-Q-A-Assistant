@@ -7,8 +7,18 @@
 
 - **SiliconFlow `/v1/rerank` 响应格式** ✅ 已验证：`documents` 接受纯字符串数组，返回 `results:[{index, document:null, relevance_score}]`，score 已在 [0,1]（实测 0.212 / 0.0000166），sigmoid 兜底未触发。
 - **SiliconFlow `/v1/embeddings`** ✅ 已验证：1024 维，OpenAI 兼容。批量上限 `EMBEDDING_BATCH_NUM=32` 待 ingest 实测，若被拒（400）则下调。
-- **Ollama 并发**：`LLM_MODEL_MAX_ASYNC=1` 先跑通；调 2 需 `OLLAMA_NUM_PARALLEL=2` 且 8GB 显存够 2 路 Qwen-7B 上下文。
+- **GLM 429**：`LLM_MODEL_MAX_ASYNC=2` + 6 次 retry（2-60s）。15-chunk demo 应可控；若仍 429 降到 1。
+- **本地 Qwen 答复稳定性**：query 角色单次答复几百 token，远短于引发崩溃的 8 分钟抽取；若 SSE 异常则改非流式或换 3b。
 - **网络延迟**：每次 query 多 2 个 SiliconFlow RTT（~100-300ms），demo 可接受。
+
+## Resolved（当前轮：LLM 分流）
+
+### 2026-07-15 — Qwen-7b 本地实体抽取 8 分钟失控生成拖崩笔记本 GPU
+- **Symptom:** `ingest alice_en.txt --max-chunks 15` 报 `TimeoutError: extract LLM func: Worker execution timeout after 480s`；Ollama 日志显示请求以 12.5 tok/s 持续 7m59s 后返回 500；`nvidia-smi` 报 `Unable to determine the device handle ... Unknown Error`（驱动级卡死）。
+- **Root cause:** Qwen2.5-7b 在 LightRAG 实体抽取时未正确触发停止符，ramble 失控生成 ≈6000 token；30W 功耗限制的笔记本 GPU（RTX 4060 Laptop）长时间满载致驱动挂死。重启 `NVDisplayContainerLocalSystem` 服务后 GPU 恢复。
+- **Fix:** LLM 按角色分流（LightRAG `role_llm_configs`）—— `extract`/`keyword` 走远程 GLM-4.7（重活不占本地 GPU），仅 `query`（最终答复，短流式）走本地 Ollama Qwen。
+- **Files:** `config.py`（拆 `llm_*`=GLM + `query_llm_*`=Qwen）、`src/graph_builder.py`（`_make_llm_func` 通用工厂 + `_make_glm_func`/`_make_qwen_func` + `role_llm_configs={"query":...}`）、`.env`/`.env.example`。
+- **验证:** 7/7 冒烟通过（含 GLM + Qwen 分别测）。
 
 ## Resolved（当前轮：迁移到 Qdrant）
 

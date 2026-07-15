@@ -23,21 +23,41 @@ DATA_DIR = PROJECT_ROOT / "data" / "books"
 
 @dataclass
 class Settings:
-    # --- LLM（本地 Ollama，OpenAI 兼容）---
+    # --- LLM：实体抽取 / 关键词抽取（远程 GLM-4.7，OpenAI 兼容）---
+    # 抽取是 ingest 时的重 LLM 工作，走远程 API 不占本地 GPU。
     llm_binding: str = field(default_factory=lambda: os.getenv("LLM_BINDING", "openai"))
     llm_api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", ""))
     llm_base_url: str | None = field(
         default_factory=lambda: os.getenv("LLM_BASE_URL") or None
     )
     llm_model: str = field(
-        default_factory=lambda: os.getenv("LLM_MODEL", "qwen2.5:7b-instruct")
+        default_factory=lambda: os.getenv("LLM_MODEL", "glm-4.7")
     )
     llm_streaming: bool = field(
         default_factory=lambda: os.getenv("LLM_STREAMING", "true").lower() == "true"
     )
-    # LightRAG LLM 并发；Ollama 默认 OLLAMA_NUM_PARALLEL=1，故默认 1。
+    # GLM 并发：保守 2 避免 429（上一轮 4 并发触发限流）。
     llm_model_max_async: int = field(
-        default_factory=lambda: int(os.getenv("LLM_MODEL_MAX_ASYNC", "1"))
+        default_factory=lambda: int(os.getenv("LLM_MODEL_MAX_ASYNC", "2"))
+    )
+
+    # --- Query LLM：最终答复生成（本地 Ollama Qwen，OpenAI 兼容）---
+    # 仅 query 角色用；短答复生成，不持续满载故不会拖崩笔记本 GPU。
+    query_llm_api_key: str = field(
+        default_factory=lambda: os.getenv("QUERY_LLM_API_KEY", "ollama")
+    )
+    query_llm_base_url: str | None = field(
+        default_factory=lambda: os.getenv("QUERY_LLM_BASE_URL") or None
+    )
+    query_llm_model: str = field(
+        default_factory=lambda: os.getenv("QUERY_LLM_MODEL", "qwen2.5:7b-instruct")
+    )
+    query_llm_streaming: bool = field(
+        default_factory=lambda: os.getenv("QUERY_LLM_STREAMING", "true").lower() == "true"
+    )
+    # Ollama 默认 OLLAMA_NUM_PARALLEL=1，故并发 1。
+    query_llm_model_max_async: int = field(
+        default_factory=lambda: int(os.getenv("QUERY_LLM_MODEL_MAX_ASYNC", "1"))
     )
 
     # --- Embedding（SiliconFlow /v1/embeddings，OpenAI 兼容）---

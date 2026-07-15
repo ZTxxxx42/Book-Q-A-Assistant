@@ -1,6 +1,6 @@
-"""冒烟测试：SiliconFlow embed/rerank + NanoVectorDB + Ollama LLM。
+"""冒烟测试：SiliconFlow embed/rerank + Qdrant + GLM 抽取 + Qwen 答复。
 
-5 项全过才说明迁移后的栈可进入 ingest/query。用 my_env 解释器运行：
+7 项全过才说明迁移后的栈可进入 ingest/query。用 my_env 解释器运行：
     D:/miniforge/envs/my_env/python.exe scripts/smoke_remote_models.py
 """
 import asyncio
@@ -45,18 +45,37 @@ async def test_empty():
     print("✅ empty-input guards")
 
 
-async def test_ollama():
+async def test_glm():
+    """验证 GLM 抽取端点（extract/keyword 角色用）。"""
     from openai import AsyncOpenAI
 
     from config import settings
 
-    cli = AsyncOpenAI(api_key=settings.llm_api_key or "ollama", base_url=settings.llm_base_url)
+    cli = AsyncOpenAI(api_key=settings.llm_api_key, base_url=settings.llm_base_url)
     r = await cli.chat.completions.create(
         model=settings.llm_model,
         messages=[{"role": "user", "content": "用一句话介绍爱丽丝梦游仙境。"}],
         max_tokens=80,
     )
-    print(f"✅ ollama: {r.choices[0].message.content}")
+    print(f"✅ glm({settings.llm_model}): {r.choices[0].message.content}")
+
+
+async def test_query_llm():
+    """验证本地 Qwen 答复端点（query 角色用）。"""
+    from openai import AsyncOpenAI
+
+    from config import settings
+
+    cli = AsyncOpenAI(
+        api_key=settings.query_llm_api_key or "ollama",
+        base_url=settings.query_llm_base_url,
+    )
+    r = await cli.chat.completions.create(
+        model=settings.query_llm_model,
+        messages=[{"role": "user", "content": "用一句话介绍爱丽丝梦游仙境。"}],
+        max_tokens=80,
+    )
+    print(f"✅ qwen({settings.query_llm_model}): {r.choices[0].message.content}")
 
 
 async def test_qdrant():
@@ -98,7 +117,8 @@ async def main():
     await test_embed()
     await test_rerank()
     await test_empty()
-    await test_ollama()
+    await test_glm()
+    await test_query_llm()
     await test_qdrant()
     await test_build_rag()
     print("\n🎉 全部冒烟测试通过")

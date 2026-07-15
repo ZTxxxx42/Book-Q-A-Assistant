@@ -4,9 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Book → Knowledge Graph: ingest a whole book (PDF/TXT/EPUB/MD), use **LightRAG** to extract entities/relations via an LLM, store the graph in **Neo4j**, vectors in **Qdrant** (Docker container), and serve a hybrid-retrieval QA API (FastAPI + SSE streaming). **SiliconFlow** API provides bge-m3 embedding + bge-reranker-v2-m3 rerank; LLM generation goes to a local **Ollama** (Qwen2.5-7B-Instruct, OpenAI-compatible).
+Book → Knowledge Graph: ingest a whole book (PDF/TXT/EPUB/MD), use **LightRAG** to extract entities/relations via an LLM, store the graph in **Neo4j**, vectors in **Qdrant** (Docker container), and serve a hybrid-retrieval QA API (FastAPI + SSE streaming). **SiliconFlow** API provides bge-m3 embedding + bge-reranker-v2-m3 rerank. LLMs are **split by role** (LightRAG `role_llm_configs`): entity/keyword **extraction** → remote **GLM-4.7** (heavy work, keeps the local GPU free); final **answer generation** → local **Ollama** Qwen2.5-7B-Instruct (OpenAI-compatible, short streamed responses only).
 
-> Migration note: the stack previously used local bge-m3/reranker + milvus-lite + remote GLM, then briefly NanoVectorDB (local JSON). It was simplified to API embed/rerank + Qdrant (Docker) + Ollama. See `docs/TROUBLESHOOTING.md` for the iteration history.
+> Why the split: running 7B extraction locally on this 30W laptop GPU caused 8-minute runaway generation that crashed the GPU driver. Extraction offloaded to GLM; the local Qwen only generates short final answers (verified stable). See `docs/TROUBLESHOOTING.md`.
+
+> Migration note: the stack previously used local bge-m3/reranker + milvus-lite + remote GLM, then briefly NanoVectorDB (local JSON). It was simplified to API embed/rerank + Qdrant (Docker) + GLM-extract / Ollama-answer. See `docs/TROUBLESHOOTING.md` for the iteration history.
 
 ## Commands
 
@@ -61,7 +63,7 @@ loader.py ──load_book/split_into_chunks──▶ graph_builder._build_rag() 
 
 - `config.py` — single `Settings` dataclass; all values from env with defaults. `settings.ensure_dirs()` creates `working_dir` + `data/books`.
 - `src/loader.py` — format-specific readers (`_read_pdf`/`_read_epub`/`_read_plain`) → `_normalize` → `split_into_chunks` (char-based, Chinese-friendly, no tokenizer dependency). `resolve_book_path` maps a bare filename to `data/books/`.
-- `src/graph_builder.py` — **the integration core**. `_build_rag()` constructs the `LightRAG` instance with `Neo4JStorage` + `QdrantVectorDBStorage` + SiliconFlow embed/rerank funcs. It injects `QDRANT_URL`/`NO_PROXY` into the process env (LightRAG's internal `QdrantClient` reads them). `ingest_book()` loads, chunks, joins, and calls `rag.ainsert(full_text, file_paths=[fname])`. `_make_llm_func()` returns the LLM callable (points at Ollama); it branches on `kwargs["stream"]` — streaming requests return an async generator (so LightRAG detects `is_streaming=True`), non-streaming (entity extraction) return a full string.
+- `src/graph_builder.py` — **the integration core**. `_build_rag()` constructs the `LightRAG` instance with `Neo4JStorage` + `QdrantVectorDBStorage` + SiliconFlow embed/rerank funcs. It injects `QDRANT_URL`/`NO_PROXY` into the process env (LightRAG's internal `QdrantClient` reads them). LLM is split via `role_llm_configs={"query": ...}`: base `llm_model_func` = `_make_glm_func()` (GLM-4.7, used for `extract`/`keyword` roles), `query` role overridden with `_make_qwen_func()` (local Ollama Qwen, final answer). `_make_llm_func(api_key, base_url, model, streaming_enabled)` is the shared factory; it branches on `kwargs["stream"]` — streaming requests return an async generator (so LightRAG detects `is_streaming=True`), non-streaming (entity extraction) return a full string. `ingest_book()` loads, chunks, joins, and calls `rag.ainsert(full_text, file_paths=[fname])`.
 - `src/remote_models.py` — `make_embedding_func()` wraps SiliconFlow `/v1/embeddings` (OpenAI-compatible, AsyncOpenAI) into a LightRAG `EmbeddingFunc` (returns float32 ndarray). `make_reranker_func()` calls SiliconFlow `/v1/rerank` (httpx, non-OpenAI) and returns `[{index, relevance_score}]` with sigmoid fallback for out-of-range scores. Both have tenacity retry on 429/5xx.
 - `src/query.py` — `ask` (non-stream), `ask_stream` (async generator, passes `conversation_history` for multi-turn), `cypher_query` (raw read-only Neo4j), `graph_stats`.
 - `src/maintenance.py` — thin wrappers over LightRAG 1.5.x maintenance API (`aedit_entity`/`adelete_by_doc_id`/`aedit_relation`…); these sync vector store + Neo4j automatically. Each helper calls `_rag()` which builds + `initialize_storages()` a fresh LightRAG per call.
@@ -78,8 +80,10 @@ See `docs/TROUBLESHOOTING.md` for the full iteration log. The non-obvious ones:
 2. **Qdrant port is `16333`, not the default `6333`** — `6333`/`6334` fall in a Windows Hyper-V reserved port range and Docker bind fails. The compose maps host `16333/16334` → container `6333/6334`. `QDRANT_URL=http://localhost:16333`.
 3. **`NO_PROXY=localhost,127.0.0.1` is force-set in `config.py`** — a system proxy (FlClash/Clash) is active on this machine; without the bypass, `qdrant-client`'s `requests` routes localhost through the proxy and Qdrant returns `502 Bad Gateway`. `config.py` injects this at import time so every entry point is covered (LightRAG builds its `QdrantClient` internally without `trust_env=False`).
 4. **Neo4j Community edition** can't create named databases, so LightRAG's `chunk-entity-relation` DB request logs "not found... Fallback to use the default database" — harmless, falls back to `neo4j` default DB.
-5. **Ollama concurrency**: default `OLLAMA_NUM_PARALLEL=1`, so `LLM_MODEL_MAX_ASYNC=1`. Raising it requires starting Ollama with `OLLAMA_NUM_PARALLEL=N` and enough VRAM for N concurrent Qwen contexts.
-6. **SiliconFlow rerank score range**: code assumes `relevance_score ∈ [0,1]` but sigmoid-normalizes anything outside (raw logit fallback). Verify with the smoke test.
+5. **Ollama concurrency**: default `OLLAMA_NUM_PARALLEL=1`, so `QUERY_LLM_MODEL_MAX_ASYNC=1`. Raising it requires starting Ollama with `OLLAMA_NUM_PARALLEL=N` and enough VRAM for N concurrent Qwen contexts.
+6. **Local Qwen is answer-only**: do NOT route `extract`/`keyword` roles to the local Qwen — long extraction generation crashes this 30W laptop GPU (see TROUBLESHOOTING). Extraction stays on remote GLM.
+7. **SiliconFlow rerank score range**: code assumes `relevance_score ∈ [0,1]` but sigmoid-normalizes anything outside (raw logit fallback). Verified in [0,1] via smoke.
+8. **GLM 429**: `LLM_MODEL_MAX_ASYNC=2` + 6-retry backoff. If 429 persists, drop to 1.
 
 ## Ports
 
