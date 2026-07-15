@@ -6,6 +6,7 @@ rerank 走 SiliconFlow 专用 /v1/rerank（非 OpenAI 兼容）。
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -21,6 +22,8 @@ from tenacity import (
 )
 
 from config import settings
+
+logger = logging.getLogger("book_kg.remote_models")
 
 
 # ---------- embedding func（LightRAG 期望）----------

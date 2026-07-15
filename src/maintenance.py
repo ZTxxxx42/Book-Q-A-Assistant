@@ -7,6 +7,7 @@ KV 子目录都按 workspace 隔离。基于 LightRAG 1.5.x 维护 API（adelete
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -14,6 +15,8 @@ from typing import Any, AsyncIterator
 from config import settings
 from src.graph_builder import _build_rag
 from src.loader import resolve_book_path
+
+logger = logging.getLogger("book_kg.maintenance")
 
 
 @asynccontextmanager

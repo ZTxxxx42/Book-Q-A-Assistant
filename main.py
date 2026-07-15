@@ -10,6 +10,7 @@ from rich.table import Table
 
 from config import settings
 from src.graph_builder import ingest_book
+from src.logging_config import setup_logging
 from src.loader import resolve_book_path
 from src.maintenance import (
     delete_document,
@@ -28,6 +29,7 @@ console = Console()
 @click.group()
 def cli() -> None:
     """Book → Knowledge Graph (LightRAG + Neo4j)。"""
+    setup_logging(settings.log_level, settings.log_dir / "app.log")
 
 
 @cli.command()

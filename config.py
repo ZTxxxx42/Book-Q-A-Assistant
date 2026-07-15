@@ -151,6 +151,12 @@ class Settings:
     # CORS 允许的来源（A4，逗号分隔；* 为全部；空则不启用 CORS）。
     cors_origins: str = field(default_factory=lambda: _cfg("CORS_ORIGINS", "cors_origins", ""))
 
+    # --- 日志（7C）---
+    # 日志级别：DEBUG / INFO / WARNING / ERROR。
+    log_level: str = field(default_factory=lambda: _cfg("LOG_LEVEL", "log_level", "INFO").upper())
+    # 日志目录（PROJECT_ROOT 下）。
+    log_dir: Path = field(default_factory=lambda: PROJECT_ROOT / _cfg("LOG_DIR", "log_dir", "logs"))
+
     # --- 输入校验（A0）---
     max_question_length: int = field(default_factory=lambda: _cfg("MAX_QUESTION_LENGTH", "max_question_length", 2000, int))
     max_book_name_length: int = field(default_factory=lambda: _cfg("MAX_BOOK_NAME_LENGTH", "max_book_name_length", 200, int))
@@ -177,6 +183,7 @@ class Settings:
     def ensure_dirs(self) -> None:
         self.working_dir.mkdir(parents=True, exist_ok=True)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()

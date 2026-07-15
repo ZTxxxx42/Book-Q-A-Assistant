@@ -7,10 +7,13 @@ Neo4j driver / Qdrant client）。重写操作（ingest/delete）不入池，独
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import OrderedDict
 from typing import Any
 
 from config import settings
+
+logger = logging.getLogger("book_kg.rag_pool")
 
 
 class _Entry:

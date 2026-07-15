@@ -9,12 +9,15 @@ LLM 按角色分流（LightRAG role_llm_configs）：
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
 
 from config import settings
 from src.loader import load_book, split_into_chunks
+
+logger = logging.getLogger("book_kg.graph_builder")
 
 
 def _make_llm_func(
@@ -236,6 +239,7 @@ async def ingest_book(
     from pathlib import Path
 
     fname = Path(file_path).name
+    logger.info("ingest 开始: %s（%d chunks, workspace=%s）", fname, len(chunks), fname)
     # 每本书用 basename 作 workspace → Neo4j 独立 label、Qdrant 独立 workspace_id、KV 独立子目录
     # ingest 是重写操作，独占实例（不入池），用完 finalize 避免连接泄漏。
     rag = _build_rag(workspace=fname)
