@@ -1,4 +1,5 @@
 services:
+  # ============ 图数据库 ============
   neo4j:
     image: neo4j:5.20
     container_name: bookgraph-neo4j
@@ -15,6 +16,7 @@ services:
       - neo4j_logs:/logs
     restart: unless-stopped
 
+  # ============ 向量库 ============
   qdrant:
     image: qdrant/qdrant:v1.12.4
     container_name: bookgraph-qdrant
@@ -25,7 +27,73 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
+  # ============ 答复 LLM：Ollama + Qwen2.5（GPU 直通）============
+  # 需宿主已装 nvidia-container-toolkit（本机 Runtime: nvidia 已就绪）。
+  # 首次启动后拉模型：docker compose --profile init up ollama-pull
+  ollama:
+    image: ollama/ollama:0.5
+    container_name: bookgraph-ollama
+    ports:
+      - "21434:11434"   # 宿主 21434 与 .env 一致；与宿主 Ollama 冲突时停掉宿主那份
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # 一次性拉取 Qwen 模型（幂等；仅 --profile init 时运行）
+  ollama-pull:
+    image: ollama/ollama:0.5
+    profiles: ["init"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "qwen2.5:7b-instruct"]
+    restart: "no"
+
+  # ============ 应用：FastAPI（自构建）============
+  app:
+    build: .
+    image: bookgraph-app:latest
+    container_name: bookgraph-app
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    environment:
+      # 容器内走 compose 服务名，覆盖 .env 里的 localhost URL（密钥仍从 .env 读）
+      QDRANT_URL: http://qdrant:6333
+      NEO4J_URI: bolt://neo4j:7687
+      QUERY_LLM_BASE_URL: http://ollama:11434/v1
+      HOST: "0.0.0.0"
+    depends_on:
+      neo4j:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ./rag_storage:/app/rag_storage     # KV + doc_status（已导入图谱持久化）
+      - ./data:/app/data                   # 书籍文件
+      - ./logs:/app/logs                   # 轮转日志
+    restart: unless-stopped
+
 volumes:
   neo4j_data:
   neo4j_logs:
   qdrant_data:
+  ollama_data:
