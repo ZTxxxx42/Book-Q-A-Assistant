@@ -37,7 +37,7 @@ class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, description="问题")
     mode: QueryMode = Field("hybrid", description="检索模式")
     stream: bool = Field(False, description="流式返回（暂不支持，预留）")
-    book: str | None = Field(None, description="限定书籍文件名（仅在该书 chunk 内作答）")
+    book: str = Field(..., description="书籍文件名（= workspace，仅检索该书图谱）")
 
 
 class QueryResponse(BaseModel):
@@ -111,7 +111,7 @@ async def health() -> dict:
 async def query_endpoint(req: QueryRequest) -> QueryResponse:
     """对图谱提问，返回答案 + 引用出处。"""
     try:
-        result = await ask(req.question, mode=req.mode, stream=False, book=req.book)
+        result = await ask(req.question, book=req.book, mode=req.mode, stream=False)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败：{e}")
     return QueryResponse(
@@ -128,7 +128,7 @@ class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1)
     mode: QueryMode = Field("hybrid")
     history: list[ChatMessage] = Field(default_factory=list, description="多轮对话历史")
-    book: str | None = Field(None, description="限定书籍文件名（仅在该书 chunk 内作答）")
+    book: str = Field(..., description="书籍文件名（= workspace，仅检索该书图谱）")
 
 
 @app.post("/chat")
@@ -142,7 +142,7 @@ async def chat_endpoint(req: ChatRequest):
 
     async def event_stream():
         try:
-            async for evt in ask_stream(req.question, mode=req.mode, history=history, book=req.book):
+            async for evt in ask_stream(req.question, book=req.book, mode=req.mode, history=history):
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except Exception as e:
@@ -221,10 +221,10 @@ async def get_task(task_id: str) -> dict:
 
 
 @app.get("/stats", response_model=StatsResponse)
-async def stats_endpoint() -> StatsResponse:
-    """查看图谱统计。"""
+async def stats_endpoint(book: str | None = None) -> StatsResponse:
+    """查看图谱统计。``book`` 给定时仅统计该书 workspace。"""
     try:
-        info = graph_stats()
+        info = graph_stats(book=book)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"统计失败（Neo4j 是否已启动？）：{e}")
     return StatsResponse(**info)
@@ -232,19 +232,21 @@ async def stats_endpoint() -> StatsResponse:
 
 class GraphRequest(BaseModel):
     entity: str = Field(..., min_length=1, description="中心实体名称（模糊匹配）")
-    depth: int = Field(1, ge=1, le=3, description="跳数：1=直接邻居，2=邻居的邻居")
+    book: str = Field(..., description="书籍文件名（= workspace）")
+    depth: int = Field(2, ge=1, le=3, description="跳数：1=直接邻居，2=邻居的邻居")
     limit: int = Field(50, ge=1, le=500, description="返回子图规模上限")
 
 
 class TopEntitiesRequest(BaseModel):
-    limit: int = Field(30, ge=1, le=200, description="返回的热门实体数量")
+    book: str = Field(..., description="书籍文件名（= workspace）")
+    limit: int = Field(40, ge=1, le=200, description="返回的热门实体数量")
 
 
 @app.post("/graph")
 async def graph_endpoint(req: GraphRequest) -> dict:
     """返回某实体周围的关系子图（nodes + edges），供前端可视化。"""
     try:
-        sub = get_subgraph(req.entity, depth=req.depth, limit=req.limit)
+        sub = get_subgraph(req.entity, book=req.book, depth=req.depth, limit=req.limit)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -256,7 +258,7 @@ async def graph_endpoint(req: GraphRequest) -> dict:
 async def graph_top_endpoint(req: TopEntitiesRequest) -> dict:
     """返回度数最高的实体，用于初始展示。"""
     try:
-        return get_top_entities(limit=req.limit)
+        return get_top_entities(book=req.book, limit=req.limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"查询失败：{e}")
 
@@ -264,7 +266,7 @@ async def graph_top_endpoint(req: TopEntitiesRequest) -> dict:
 # ---------- 维护：文档 / 实体 / 关系 ----------
 
 class RefreshRequest(BaseModel):
-    file: str = Field(..., description="重新导入的书籍路径（data/books 下文件名或绝对路径）")
+    file: str | None = Field(None, description="重新导入的书籍路径；省略则用 book 名")
     max_chunks: int | None = Field(None)
 
 
@@ -284,36 +286,36 @@ class EditRelationRequest(BaseModel):
 
 @app.get("/documents")
 async def documents_endpoint() -> list[dict]:
-    """列出所有已导入的文档。"""
+    """列出所有已导入的文档（各 workspace）。"""
     try:
-        return await list_documents()
+        return list_documents()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"读取文档列表失败：{e}")
 
 
-@app.get("/documents/{doc_id}")
-async def document_detail_endpoint(doc_id: str) -> dict:
-    """取单个文档详情。"""
-    d = await get_document(doc_id)
+@app.get("/documents/{book}")
+async def document_detail_endpoint(book: str) -> dict:
+    """取单本书文档详情（按 workspace）。"""
+    d = await get_document(book)
     if not d:
         raise HTTPException(status_code=404, detail="文档不存在")
     return d
 
 
-@app.delete("/documents/{doc_id}")
-async def delete_document_endpoint(doc_id: str) -> dict:
-    """删除一整本书（含其 chunks / 实体 / 关系 / 向量）。"""
+@app.delete("/documents/{book}")
+async def delete_document_endpoint(book: str) -> dict:
+    """删除一整本书（其 workspace：Neo4j label 节点 + Qdrant 向量 + KV 子目录）。"""
     try:
-        return await delete_document(doc_id)
+        return await delete_document(book)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除失败：{e}")
 
 
-@app.post("/documents/{doc_id}/refresh")
-async def refresh_document_endpoint(doc_id: str, req: RefreshRequest) -> dict:
-    """刷新一本书：删旧 doc 后重新导入指定文件。"""
+@app.post("/documents/{book}/refresh")
+async def refresh_document_endpoint(book: str, req: RefreshRequest) -> dict:
+    """刷新一本书：删旧 workspace 后重新导入指定文件。"""
     try:
-        return await refresh_document(doc_id, req.file, max_chunks=req.max_chunks)
+        return await refresh_document(req.file or book, max_chunks=req.max_chunks)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -321,7 +323,7 @@ async def refresh_document_endpoint(doc_id: str, req: RefreshRequest) -> dict:
 
 
 @app.post("/entities/{entity_id}/edit")
-async def edit_entity_endpoint(entity_id: str, req: EditEntityRequest) -> dict:
+async def edit_entity_endpoint(entity_id: str, req: EditEntityRequest, book: str) -> dict:
     """编辑实体（属性 / 重命名），自动重算 embedding 并同步向量库。"""
     updated = {k: v for k, v in req.model_dump().items() if v is not None}
     updated.pop("allow_rename", None)
@@ -331,40 +333,40 @@ async def edit_entity_endpoint(entity_id: str, req: EditEntityRequest) -> dict:
     try:
         return await edit_entity(
             entity_id, updated,
-            allow_rename=req.allow_rename, allow_merge=req.allow_merge,
+            allow_rename=req.allow_rename, allow_merge=req.allow_merge, book=book,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"编辑失败：{e}")
 
 
 @app.delete("/entities/{entity_id}")
-async def delete_entity_endpoint(entity_id: str) -> dict:
+async def delete_entity_endpoint(entity_id: str, book: str) -> dict:
     """删除单个实体（含其关系），同步清理向量库。"""
     try:
-        return await delete_entity(entity_id)
+        return await delete_entity(entity_id, book=book)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除失败：{e}")
 
 
 @app.post("/relations/edit")
 async def edit_relation_endpoint(
-    source: str, target: str, req: EditRelationRequest,
+    source: str, target: str, req: EditRelationRequest, book: str,
 ) -> dict:
-    """编辑一条关系。通过 query 参数 ?source=&target= 指定两端。"""
+    """编辑一条关系。通过 query 参数 ?source=&target=&book= 指定。"""
     updated = {k: v for k, v in req.model_dump().items() if v is not None}
     if not updated:
         raise HTTPException(status_code=400, detail="未提供任何修改字段")
     try:
-        return await edit_relation(source, target, updated)
+        return await edit_relation(source, target, updated, book=book)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"编辑失败：{e}")
 
 
 @app.delete("/relations")
-async def delete_relation_endpoint(source: str, target: str) -> dict:
+async def delete_relation_endpoint(source: str, target: str, book: str) -> dict:
     """删除一条关系（保留两端实体）。"""
     try:
-        return await delete_relation(source, target)
+        return await delete_relation(source, target, book=book)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除失败：{e}")
 

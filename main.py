@@ -54,12 +54,11 @@ def ingest(file: str, max_chunks: int | None) -> None:
     default="hybrid",
     help="检索模式",
 )
-@click.option("--book", default=None, help="限定书籍文件名（仅在该书 chunk 内作答）")
-def query(question: str, mode: str, book: str | None) -> None:
-    """对图谱提问。"""
-    scope = f", book={book}" if book else ""
-    console.print(f"[cyan]问题[/cyan] ({mode}{scope}): {question}")
-    result = asyncio.run(ask(question, mode=mode, book=book))  # type: ignore[arg-type]
+@click.option("--book", required=True, help="书籍文件名（= workspace，仅检索该书图谱）")
+def query(question: str, mode: str, book: str) -> None:
+    """对图谱提问（限定一本书）。"""
+    console.print(f"[cyan]问题[/cyan] ({mode}, book={book}): {question}")
+    result = asyncio.run(ask(question, book=book, mode=mode))  # type: ignore[arg-type]
     console.print("\n[bold green]回答:[/bold green]")
     console.print(result["answer"])
     refs = result.get("references", [])
@@ -70,10 +69,12 @@ def query(question: str, mode: str, book: str | None) -> None:
 
 
 @cli.command()
-def stats() -> None:
+@click.option("--book", default=None, help="书籍文件名（= workspace）；省略则统计全部")
+def stats(book: str | None) -> None:
     """查看图谱统计。"""
-    info = graph_stats()
-    table = Table(title="知识图谱统计")
+    info = graph_stats(book=book)
+    title = f"知识图谱统计 ({book})" if book else "知识图谱统计（全部）"
+    table = Table(title=title)
     table.add_column("项")
     table.add_column("值", style="green")
     table.add_row("节点总数", str(info["total_nodes"]))

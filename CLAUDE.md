@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Book → Knowledge Graph: ingest a whole book (PDF/TXT/EPUB/MD), use **LightRAG** to extract entities/relations via an LLM, store the graph in **Neo4j**, vectors in **Qdrant** (Docker container), and serve a hybrid-retrieval QA API (FastAPI + SSE streaming). **SiliconFlow** API provides bge-m3 embedding + bge-reranker-v2-m3 rerank. LLMs are **split by role** (LightRAG `role_llm_configs`): entity/keyword **extraction** → remote **GLM-4.7** (heavy work, keeps the local GPU free); final **answer generation** → local **Ollama** Qwen2.5-7B-Instruct (OpenAI-compatible, short streamed responses only).
+Book → Knowledge Graph: ingest a whole book (PDF/TXT/EPUB/MD), use **LightRAG** to extract entities/relations via an LLM, store the graph in **Neo4j**, vectors in **Qdrant** (Docker container), and serve a hybrid-retrieval QA API (FastAPI + SSE streaming). **Each book is an independent knowledge graph** — LightRAG `workspace` = book basename isolates Neo4j label, Qdrant `workspace_id`, and KV subdirectory. No cross-book merging; no cross-book query. **SiliconFlow** API provides bge-m3 embedding + bge-reranker-v2-m3 rerank. LLMs are **split by role** (LightRAG `role_llm_configs`): entity/keyword **extraction** → remote **GLM-4.7** (heavy work, keeps the local GPU free); final **answer generation** → local **Ollama** Qwen2.5-7B-Instruct (OpenAI-compatible, short streamed responses only).
 
-> Why the split: running 7B extraction locally on this 30W laptop GPU caused 8-minute runaway generation that crashed the GPU driver. Extraction offloaded to GLM; the local Qwen only generates short final answers (verified stable). See `docs/TROUBLESHOOTING.md`.
+> Why per-book workspaces: a "book knowledge graph" is naturally one-graph-per-book; merged graphs crossed entity boundaries confusingly. `workspace=basename` gives true isolation (independent Neo4j labels, clean per-book delete, native per-book hybrid retrieval instead of a chunk-filter hack). Cross-book query was dropped as out of scope.
 
-> Migration note: the stack previously used local bge-m3/reranker + milvus-lite + remote GLM, then briefly NanoVectorDB (local JSON). It was simplified to API embed/rerank + Qdrant (Docker) + GLM-extract / Ollama-answer. See `docs/TROUBLESHOOTING.md` for the iteration history.
+> Migration note: the stack previously used local bge-m3/reranker + milvus-lite + remote GLM, then NanoVectorDB, then a merged Qdrant graph with a chunk-filter per-book hack. Now: API embed/rerank + Qdrant + GLM-extract / Ollama-answer + per-book workspaces. See `docs/TROUBLESHOOTING.md` for the iteration history.
 
 ## Commands
 
@@ -46,9 +46,9 @@ curl -N -X POST http://localhost:8010/chat -H "Content-Type: application/json" \
 
 Query modes: `local` (specific entity/fact), `global` (cross-chapter), `hybrid` (default, recommended), `naive` (plain vector RAG, no graph).
 
-**Per-book filtering**: `/query` and `/chat` accept an optional `book` (filename) field; CLI `query --book <name>`. When set, retrieval bypasses LightRAG and queries the Qdrant chunks collection directly with a `file_path` payload filter + rerank, then generates via the local Qwen with a strict "answer only from this book's context" prompt. Without `book`, the normal LightRAG hybrid retrieval runs cross-DB. See `docs/reports/phase2-multi-book.md`.
+**Per-book independent graphs**: every API that touches the graph takes a required `book` (filename = workspace): `/query`, `/chat`, `/graph`, `/graph/top`, `/stats?book=`, `/documents/{book}` (GET/DELETE), `/documents/{book}/refresh`, entity/relation edit endpoints (`?book=`). CLI: `query --book`, `stats --book`. Each book's entities/relations/chunks live in their own Neo4j label + Qdrant workspace_id + `working_dir/<book>/` KV subdir. Cross-book query is not supported by design.
 
-**Document upsert**: `POST /documents/upsert` (and `maintenance.upsert_document`) handles same-basename re-ingest — LightRAG's filename dedup blocks plain re-ingest of an changed file, so upsert deletes the existing doc_id first then re-ingests.
+**Document upsert**: `POST /documents/upsert` handles same-basename re-ingest — deletes the existing workspace then re-ingests.
 
 ## Architecture
 
@@ -100,12 +100,7 @@ See `docs/TROUBLESHOOTING.md` for the full iteration log. The non-obvious ones:
 
 ## Re-ingesting
 
-Before re-importing a book, clear Qdrant collections + Neo4j to avoid duplicate entities:
-```bash
-# Qdrant: drop collections (re-created on next ingest)
-curl -X DELETE http://localhost:16333/collections/lightrag_vdb_chunks_baai_bge_m3_1024d
-curl -X DELETE http://localhost:16333/collections/lightrag_vdb_relationships_baai_bge_m3_1024d
-# Neo4j:
-python main.py cypher -c "MATCH (n) DETACH DELETE n"
-```
-`rag_storage/` (KV cache + doc_status JSON) can also be wiped for a fully clean slate.
+Each book is isolated in its own workspace, so re-importing one book doesn't touch others:
+- **Update one book**: `POST /documents/{book}/refresh` or `POST /documents/upsert` (deletes that book's workspace, then re-ingests).
+- **Delete one book**: `DELETE /documents/{book}` — removes its Neo4j label nodes, Qdrant workspace_id points, and `working_dir/<book>/` KV subdir.
+- **Full wipe** (all books): drop Qdrant collections + `MATCH (n) DETACH DELETE n` in Neo4j + `rm -rf rag_storage/*`, then re-ingest each book.

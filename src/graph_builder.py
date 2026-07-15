@@ -108,8 +108,13 @@ def _make_qwen_func():
     )
 
 
-def _build_rag():
-    """构造已配置 Qdrant + Neo4j + SiliconFlow embed/rerank + 双 LLM 的 LightRAG 实例。"""
+def _build_rag(workspace: str = ""):
+    """构造已配置 Qdrant + Neo4j + SiliconFlow embed/rerank + 双 LLM 的 LightRAG 实例。
+
+    ``workspace`` 给定时，该实例的所有存储（图/向量/KV）都隔离在该 workspace：
+    Neo4j 节点 label = workspace、Qdrant payload workspace_id = workspace、
+    KV 落 working_dir/<workspace>/。每本书用各自 basename 作 workspace → 独立图谱。
+    """
     import os
 
     from lightrag.llm_roles import RoleLLMConfig
@@ -130,6 +135,7 @@ def _build_rag():
 
     return LightRAG(
         working_dir=str(settings.working_dir),
+        workspace=workspace,                       # 每书独立 workspace = 独立图谱
         llm_model_func=_make_glm_func(),          # base = GLM（extract / keyword 角色）
         llm_model_name=settings.llm_model,
         embedding_func=make_embedding_func(),
@@ -156,23 +162,25 @@ async def ingest_book(
     file_path: str,
     max_chunks: int | None = None,
 ) -> dict:
-    """加载并导入一本书，返回统计信息。"""
+    """加载并导入一本书到其独立 workspace（= 文件 basename），返回统计信息。"""
     text = load_book(file_path)
     chunks = split_into_chunks(text)
     if max_chunks:
         chunks = chunks[:max_chunks]
 
-    rag = _build_rag()
-    await rag.initialize_storages()
-    full_text = "\n\n".join(chunks)
     from pathlib import Path
 
     fname = Path(file_path).name
+    # 每本书用 basename 作 workspace → Neo4j 独立 label、Qdrant 独立 workspace_id、KV 独立子目录
+    rag = _build_rag(workspace=fname)
+    await rag.initialize_storages()
+    full_text = "\n\n".join(chunks)
     await rag.ainsert(full_text, file_paths=[fname])
 
     return {
         "file": str(file_path),
         "total_chars": len(text),
         "chunks": len(chunks),
+        "workspace": fname,
         "working_dir": str(settings.working_dir),
     }

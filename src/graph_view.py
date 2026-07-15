@@ -1,7 +1,7 @@
 """图谱子图查询：返回指定实体周围的关系子图，供前端可视化。
 
 LightRAG Neo4j 后端的存储约定：
-  - 节点 label = workspace 名（如 "base"），实体名在 `entity_id`，类型在 `entity_type`
+  - 节点 label = workspace 名（每书 = 文件 basename），实体名在 `entity_id`，类型在 `entity_type`
   - 边 type 统一为 "DIRECTED"，语义在 `description` / `weight` 属性里
 
 输出格式（兼容 D3 / ECharts / Cytoscape）：
@@ -10,8 +10,6 @@ LightRAG Neo4j 后端的存储约定：
     "center": <查询的实体名> }
 """
 from __future__ import annotations
-
-from src.query import cypher_query
 
 
 def _run(cypher: str, params: dict | None = None) -> list[dict]:
@@ -31,15 +29,23 @@ def _run(cypher: str, params: dict | None = None) -> list[dict]:
         driver.close()
 
 
-def get_subgraph(entity_name: str, depth: int = 1, limit: int = 50) -> dict:
-    """以某实体为中心，取 depth 跳内的子图。"""
+def _label(book: str) -> str:
+    """构造 backtick 转义的 Neo4j label 片段，如 `:`alice_en.txt``。"""
+    safe = book.replace("`", "``")
+    return f"`{safe}`"
+
+
+def get_subgraph(entity_name: str, book: str, depth: int = 1, limit: int = 50) -> dict:
+    """以某实体为中心，取该书 workspace 内 depth 跳的子图。"""
     if depth < 1 or depth > 3:
         raise ValueError("depth 取值 1-3")
+
+    lbl = _label(book)
 
     # 节点：路径上所有节点去重
     node_rows = _run(
         f"""
-        MATCH p = (n)-[r*1..{depth}]-(m)
+        MATCH p = (n:{lbl})-[r*1..{depth}]-(m)
         WHERE toLower(n.entity_id) CONTAINS toLower($name)
         UNWIND nodes(p) AS node
         WITH DISTINCT node
@@ -69,7 +75,7 @@ def get_subgraph(entity_name: str, depth: int = 1, limit: int = 50) -> dict:
     # 边：路径上所有关系去重，用 startNode/endNode 取端点
     edge_rows = _run(
         f"""
-        MATCH p = (n)-[r*1..{depth}]-(m)
+        MATCH p = (n:{lbl})-[r*1..{depth}]-(m)
         WHERE toLower(n.entity_id) CONTAINS toLower($name)
         UNWIND relationships(p) AS rel
         WITH DISTINCT rel
@@ -111,11 +117,12 @@ def get_subgraph(entity_name: str, depth: int = 1, limit: int = 50) -> dict:
     return {"nodes": nodes, "edges": edges, "center": entity_name}
 
 
-def get_top_entities(limit: int = 30) -> dict:
-    """返回度数最高的实体，用于初始展示。"""
+def get_top_entities(book: str, limit: int = 30) -> dict:
+    """返回该书 workspace 内度数最高的实体，用于初始展示。"""
+    lbl = _label(book)
     rows = _run(
-        """
-        MATCH (n)-[r]-()
+        f"""
+        MATCH (n:{lbl})-[r]-()
         WITH n, count(r) AS degree
         ORDER BY degree DESC
         LIMIT $limit
@@ -136,3 +143,4 @@ def get_top_entities(limit: int = 30) -> dict:
         if r.get("name")
     ]
     return {"nodes": nodes, "edges": []}
+

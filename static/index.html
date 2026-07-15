@@ -124,6 +124,7 @@
   <header>
     <h1>📚 <span>书籍知识图谱</span></h1>
     <div class="controls">
+      <select id="book-select"><option value="">加载中…</option></select>
       <input type="text" id="entity-input" placeholder="输入实体名称（模糊）" />
       <select id="depth">
         <option value="1">1 跳</option>
@@ -191,10 +192,7 @@
         <option value="global">global</option>
         <option value="naive">naive</option>
       </select>
-      <select id="q-book">
-        <option value="">不限书籍</option>
-      </select>
-      <input type="text" id="q-input" placeholder="基于图谱提问，支持多轮对话…" />
+      <input type="text" id="q-input" placeholder="基于当前书籍图谱提问…" />
       <button id="q-btn">💬 提问</button>
       <button class="secondary" id="q-clear">清空对话</button>
     </div>
@@ -203,7 +201,12 @@
 <script>
 const API = ""; // 同源；跨域时填后端地址
 const chart = echarts.init(document.getElementById("chart"), "dark");
-let currentNodes = [], currentEdges = [], disabledLabels = new Set();
+let currentNodes = [], currentEdges = [], disabledLabels = new Set(), currentBook = "";
+
+function currentBookOrWarn() {
+  if (!currentBook) { toast("请先选择或导入一本书", "error"); return ""; }
+  return currentBook;
+}
 
 // ---------- toast ----------
 function toast(msg, kind = "") {
@@ -305,11 +308,12 @@ window.expandNode = async function(name) {
 
 // ---------- 子图 / 热门 ----------
 async function loadSubgraph(entity, depth) {
+  const book = currentBookOrWarn(); if (!book) return;
   depth = depth || parseInt(document.getElementById("depth").value);
   try {
     const r = await fetch(API + "/graph", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ entity, depth, limit: 100 })
+      body: JSON.stringify({ entity, book, depth, limit: 100 })
     });
     const sub = await r.json();
     if (!sub.nodes || !sub.nodes.length) { toast("未找到实体：" + entity, "error"); return; }
@@ -318,13 +322,14 @@ async function loadSubgraph(entity, depth) {
 }
 
 async function loadTop() {
+  const book = currentBookOrWarn(); if (!book) return;
   try {
     const r = await fetch(API + "/graph/top", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ limit: 40 })
+      body: JSON.stringify({ book, limit: 40 })
     });
     const sub = await r.json();
-    if (!sub.nodes || !sub.nodes.length) { toast("图谱为空，请先导入书籍", "error"); return; }
+    if (!sub.nodes || !sub.nodes.length) { toast("该书图谱为空", "error"); return; }
     render({ nodes: sub.nodes, edges: [] });
     document.getElementById("node-info").innerHTML =
       `<h2>热门实体</h2><p class="muted">点击节点查看关联，或输入名称搜索子图。</p>`;
@@ -334,7 +339,8 @@ async function loadTop() {
 // ---------- 统计 + 图例 ----------
 async function loadStats() {
   try {
-    const r = await fetch(API + "/stats");
+    const url = currentBook ? API + "/stats?book=" + encodeURIComponent(currentBook) : API + "/stats";
+    const r = await fetch(url);
     const s = await r.json();
     document.getElementById("stat-total").textContent = s.total_nodes;
     document.getElementById("stat-total-rel").textContent = s.total_relationships;
@@ -360,7 +366,8 @@ window.toggleLabel = function(lbl) {
   else disabledLabels.add(lbl);
   render(currentNodes.length ? { nodes: currentNodes, edges: currentEdges } : { nodes: [], edges: [] });
   // 刷新图例状态
-  fetch(API + "/stats").then(r => r.json()).then(s => renderLegend(s.node_counts_by_label || {}));
+  const url = currentBook ? API + "/stats?book=" + encodeURIComponent(currentBook) : API + "/stats";
+  fetch(url).then(r => r.json()).then(s => renderLegend(s.node_counts_by_label || {}));
 };
 
 // ---------- 文档管理 ----------
@@ -376,18 +383,36 @@ async function loadDocs() {
         <div class="doc-name">${d.file_path}<span class="status-tag ${st}">${d.status}</span></div>
         <div class="doc-meta">${d.chunks_count} chunks · ${new Date((d.created_at||0)*1000).toLocaleString()}</div>
         <div class="doc-actions">
-          <button class="secondary sm" onclick="refreshDoc('${d.doc_id}','${d.file_path}')">刷新</button>
-          <button class="danger sm" onclick="deleteDoc('${d.doc_id}','${d.file_path}')">删除</button>
+          <button class="secondary sm" onclick="refreshDoc('${d.file_path}')">刷新</button>
+          <button class="danger sm" onclick="deleteDoc('${d.file_path}')">删除</button>
+          <button class="secondary sm" onclick="selectBook('${d.file_path}')">查看图谱</button>
         </div>
       </div>`;
     }).join("");
-    // 同步填充书籍下拉
-    const sel = document.getElementById("q-book");
+    // 同步填充顶部书籍选择器
+    const sel = document.getElementById("book-select");
     const cur = sel.value;
-    sel.innerHTML = '<option value="">不限书籍</option>' +
-      docs.filter(d => d.status === "processed").map(d => `<option value="${d.file_path}">${d.file_path}</option>`).join("");
-    sel.value = cur;
+    sel.innerHTML = docs.filter(d => d.status === "processed")
+      .map(d => `<option value="${d.file_path}">${d.file_path}</option>`).join("") ||
+      '<option value="">暂无书籍</option>';
+    if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+    else if (sel.options[0] && sel.options[0].value) { sel.value = sel.options[0].value; onBookChange(); }
   } catch (e) { toast("加载文档失败：" + e, "error"); }
+}
+
+window.selectBook = function(book) {
+  document.getElementById("book-select").value = book;
+  onBookChange();
+  document.querySelector('.tab[data-tab="overview"]').click();
+};
+
+function onBookChange() {
+  currentBook = document.getElementById("book-select").value;
+  if (!currentBook) return;
+  disabledLabels.clear();
+  chart.clear();
+  loadStats();
+  loadTop();
 }
 
 async function ingestFile(upsert) {
@@ -403,30 +428,36 @@ async function ingestFile(upsert) {
     const data = await r.json();
     if (!r.ok) { toast((data.detail || "导入失败"), "error"); return; }
     toast((upsert ? "Upsert 完成" : "导入完成") + "：" + (file), "ok");
-    loadDocs(); loadStats();
+    await loadDocs();
+    // 选中新导入的书并查看其图谱
+    const sel = document.getElementById("book-select");
+    if ([...sel.options].some(o => o.value === file)) { sel.value = file; onBookChange(); }
+    else loadStats();
   } catch (e) { toast("导入失败：" + e, "error"); }
 }
 
-window.deleteDoc = async function(docId, name) {
-  if (!confirm(`删除「${name}」？将同步清理其向量与图谱节点。`)) return;
+window.deleteDoc = async function(name) {
+  if (!confirm(`删除「${name}」？将清除其独立图谱、向量与 KV。`)) return;
   try {
-    const r = await fetch(API + "/documents/" + docId, { method: "DELETE" });
+    const r = await fetch(API + "/documents/" + encodeURIComponent(name), { method: "DELETE" });
     if (!r.ok) { const e = await r.json(); toast(e.detail || "删除失败", "error"); return; }
     toast("已删除：" + name, "ok");
-    loadDocs(); loadStats(); loadTop();
+    loadDocs();
+    if (currentBook === name) { currentBook = ""; chart.clear(); }
+    loadStats();
   } catch (e) { toast("删除失败：" + e, "error"); }
 };
 
-window.refreshDoc = async function(docId, name) {
+window.refreshDoc = async function(name) {
   toast("刷新中（删旧重导）…");
   try {
-    const r = await fetch(API + `/documents/${docId}/refresh`, {
+    const r = await fetch(API + `/documents/${encodeURIComponent(name)}/refresh`, {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({ file: name, max_chunks: null })
     });
     if (!r.ok) { const e = await r.json(); toast(e.detail || "刷新失败", "error"); return; }
     toast("已刷新：" + name, "ok");
-    loadDocs(); loadStats();
+    loadDocs(); loadStats(); loadTop();
   } catch (e) { toast("刷新失败：" + e, "error"); }
 };
 
@@ -470,7 +501,7 @@ async function askQuestion() {
   const q = document.getElementById("q-input").value.trim();
   if (!q) return;
   const mode = document.getElementById("q-mode").value;
-  const book = document.getElementById("q-book").value || null;
+  const book = currentBookOrWarn(); if (!book) return;
   document.getElementById("q-input").value = "";
 
   addMsg("user", q);
@@ -539,6 +570,9 @@ document.getElementById("cypher-run").onclick = runCypher;
 document.getElementById("cypher-input").addEventListener("keydown", e => {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) runCypher();
 });
+document.getElementById("book-select").onchange = onBookChange;
+// 导入/删除后刷新书籍列表
+async function refreshBooksAndGraph() { await loadDocs(); }
 
 // tab 切换
 document.querySelectorAll(".tab").forEach(t => {
@@ -553,9 +587,8 @@ document.querySelectorAll(".tab").forEach(t => {
 
 window.addEventListener("resize", () => chart.resize());
 
-// 初始化
-loadStats();
-loadTop();
+// 初始化：拉文档列表 → 填充书籍选择器 → 自动选第一本并加载其图谱
+loadDocs();
 </script>
 </body>
 </html>

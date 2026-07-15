@@ -11,6 +11,16 @@
 - **本地 Qwen 答复稳定性**：query 角色单次答复几百 token，远短于引发崩溃的 8 分钟抽取；若 SSE 异常则改非流式或换 3b。
 - **网络延迟**：每次 query 多 2 个 SiliconFlow RTT（~100-300ms），demo 可接受。
 
+## Resolved（当前轮：阶段 4 每书独立工作区）
+
+### 2026-07-15 — 多书合并图语义混乱 + 按书过滤 hack 脆弱
+- **Symptom:** 阶段 2 把所有书塞进一个 LightRAG 实例，同名实体跨书合并、关系混淆；按书查询靠 `only_need_context` + 直接查 Qdrant payload 过滤 chunks，绕过 LightRAG 检索管线，rerank/上下文都要自己重做，且 `data.chunks` 在 only_need_context 下为空。
+- **Root cause:** 一个实例装多书违背"一本书一张图"的自然语义；LightRAG 1.5.4 原生支持 `workspace` 参数隔离 Neo4j label / Qdrant workspace_id / KV 子目录，之前没用。
+- **Fix:** `workspace = basename`。`graph_builder._build_rag(workspace)` 透传给 `LightRAG(workspace=...)`；`ingest_book` 设 `workspace=fname`。`query`/`graph_view`/`maintenance` 全部按 book 构建 workspace 实例，走原生 hybrid 检索；删除 `_retrieve_chunks_for_book` hack。`delete_document(book)` 删 label 节点 + workspace 向量 + KV 子目录。API/CLI `book` 必填，砍掉跨书查询。
+- **验证:** alice 96 节点（label=alice_en.txt）、ocean 26 节点（label=ocean_tale.txt），全局 122=96+26；按书查询各自命中、引用各自出处。
+- **Files:** `src/graph_builder.py`、`src/query.py`、`src/graph_view.py`、`src/maintenance.py`、`src/api.py`、`main.py`、`static/index.html`、`CLAUDE.md`。
+- **报告:** `docs/reports/phase4-per-book-workspaces.md`。
+
 ## Resolved（当前轮：阶段 3 前端管理面板）
 
 ### 2026-07-15 — 前端缺管理面板，仅图谱+问答
