@@ -1,0 +1,78 @@
+# 配置文件示例。复制为 config.yaml 后按需修改（config.yaml 已 gitignore，不提交）。
+#
+# 优先级：环境变量（.env） > config.yaml > 下方默认值。
+# 敏感项（*_api_key / neo4j_password）走 .env 环境变量，不在此文件，UI 中以 *** 只读展示。
+# 改动后需重启服务才生效（settings 为启动时单例）。
+
+# ===== LLM：实体/关键词抽取（远程 GLM-4.7）=====
+llm_binding: openai
+llm_base_url:            # 例：https://open.bigmodel.cn/api/paas/v4
+llm_model: glm-4.7
+llm_streaming: true
+llm_model_max_async: 2   # 保守 2 避免 429
+
+# ===== Query LLM：答复生成（本地 Ollama Qwen）=====
+query_llm_base_url:      # 例：http://127.0.0.1:21434/v1
+query_llm_model: qwen2.5:7b-instruct
+query_llm_streaming: true
+query_llm_model_max_async: 1   # 对齐 OLLAMA_NUM_PARALLEL=1
+
+# ===== Embedding（SiliconFlow bge-m3）=====
+embedding_binding: openai
+embedding_base_url:
+embedding_model: BAAI/bge-m3
+embedding_dim: 1024
+
+# ===== Rerank（SiliconFlow bge-reranker-v2-m3）=====
+rerank_model: BAAI/bge-reranker-v2-m3
+rerank_base_url:
+enable_rerank: true
+
+# ===== 向量库 Qdrant =====
+qdrant_url: http://localhost:16333
+
+# ===== Neo4j =====
+neo4j_uri: bolt://localhost:7687
+neo4j_username: neo4j
+
+# ===== 存储 / 分块 =====
+working_dir: rag_storage
+chunk_size: 1200
+chunk_overlap: 100
+language: chinese
+
+# ===== 查询 / 检索质量 =====
+top_k: 40
+chunk_top_k: 12
+min_rerank_score: 0.3
+include_references: true
+response_type: Single Paragraph   # Multiple Paragraphs / Single Paragraph / Bullet Points
+
+# ===== Query 容错护栏（A1 硬拒答）=====
+min_hit_count: 1
+hard_refuse_threshold: 0.3
+hard_refuse_answer: 知识库中未找到足够信息回答此问题。
+
+# ===== LLM 鲁棒性 + SSE/CORS（A2/A4）=====
+llm_timeout: 60
+query_llm_timeout: 120
+stream_first_token_timeout: 60
+stream_heartbeat_interval: 15
+cors_origins:            # 逗号分隔；* 为全部（自动关 credentials）；空则不启用
+
+# ===== 输入校验（A0）=====
+max_question_length: 2000
+max_book_name_length: 200
+max_history_turns: 10
+
+# ===== 并发硬化（B0/B1/B2）=====
+rag_pool_size: 5
+global_extract_concurrency: 2
+global_keyword_concurrency: 2
+global_query_concurrency: 1
+global_embedding_concurrency: 4
+global_rerank_concurrency: 4
+max_concurrent_requests: 8
+max_concurrent_ingest: 1
+query_overall_timeout: 180
+task_ttl: 3600

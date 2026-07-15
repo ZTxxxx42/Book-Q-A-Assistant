@@ -1,10 +1,12 @@
 .venv/
 .env
+config.yaml
 __pycache__/
 *.pyc
 rag_storage/
 rag_storage_backup/
 model_cache/
+logs/
 data/books/*
 !data/books/.gitkeep
 *.db
