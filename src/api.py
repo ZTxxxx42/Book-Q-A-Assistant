@@ -60,6 +60,7 @@ class QueryRequest(BaseModel):
     mode: QueryMode = Field("hybrid", description="检索模式")
     stream: bool = Field(False, description="流式返回（暂不支持，预留）")
     book: str = Field(..., description="书籍文件名（= workspace，仅检索该书图谱）")
+    decompose: bool = Field(False, description="A3：用 GLM 拆子问题扩展查询（默认关）")
 
     @field_validator("book")
     @classmethod
@@ -103,6 +104,8 @@ _tasks: dict[str, dict] = {}
 # 限流（B2）：HTTP 入口并发上限 + ingest 并发上限
 _query_concurrency: asyncio.Semaphore | None = None
 _ingest_concurrency: asyncio.Semaphore | None = None
+# B4：当前在飞查询数（用于排队可见化）
+_query_in_flight: int = 0
 
 
 def _query_sem() -> asyncio.Semaphore:
@@ -132,6 +135,51 @@ async def _try_acquire(sem: asyncio.Semaphore) -> bool:
 
 def _release(sem: asyncio.Semaphore) -> None:
     sem.release()
+
+
+async def _with_heartbeat(agen, interval: float = 15.0):
+    """包装异步生成器：两条事件之间若超过 interval 秒，插入一条 ping 心跳。
+
+    防 SSE 长连接被中间代理/浏览器因空闲超时断流。
+
+    实现要点：用后台任务消费生成器并推入 queue，主循环只对 queue.get() 计时。
+    绝不 ``wait_for`` 生成器的 ``__anext__`` —— 超时会 cancel 掉正在 await 的生成器
+    帧从而终止它（经典坑）。
+    """
+    import asyncio as _aio
+
+    queue: _aio.Queue = _aio.Queue()
+    _SENTINEL = object()
+
+    async def _producer():
+        try:
+            async for evt in agen:
+                await queue.put(evt)
+        except Exception as e:
+            await queue.put(e)
+        finally:
+            await queue.put(_SENTINEL)
+
+    task = _aio.create_task(_producer())
+    try:
+        while True:
+            try:
+                item = await _aio.wait_for(queue.get(), timeout=interval)
+            except _aio.TimeoutError:
+                yield {"type": "ping"}
+                continue
+            if item is _SENTINEL:
+                return
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except Exception:
+                pass
 
 
 def _ensure_book_exists(book: str) -> None:
@@ -211,6 +259,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# A4：CORS（若配置了 CORS_ORIGINS）。通配源 "*" 与 credentials 不兼容（CORS 规范
+# 禁止），故检测到 "*" 时自动关闭 credentials；其余情况按显式来源允许 credentials。
+if settings.cors_origins:
+    from fastapi.middleware.cors import CORSMiddleware
+
+    _cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+    _cors_allow_credentials = "*" not in _cors_origins
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=_cors_allow_credentials,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 
 # ---------- 路由 ----------
 
@@ -243,7 +306,8 @@ async def query_endpoint(req: QueryRequest) -> QueryResponse:
         )
     try:
         result = await asyncio.wait_for(
-            ask(req.question, book=req.book, mode=req.mode, stream=False),
+            ask(req.question, book=req.book, mode=req.mode, stream=False,
+                history=None, decompose=req.decompose),
             timeout=settings.query_overall_timeout,
         )
     except asyncio.TimeoutError:
@@ -269,6 +333,7 @@ class ChatRequest(BaseModel):
         default_factory=list, max_length=settings.max_history_turns, description="多轮对话历史"
     )
     book: str = Field(..., description="书籍文件名（= workspace，仅检索该书图谱）")
+    decompose: bool = Field(False, description="A3：用 GLM 拆子问题扩展查询（默认关）")
 
     @field_validator("book")
     @classmethod
@@ -286,16 +351,29 @@ async def chat_endpoint(req: ChatRequest):
     """
     _ensure_book_exists(req.book)
     sem = _query_sem()
-    if not await _try_acquire(sem):
-        raise HTTPException(
-            status_code=503, detail="服务繁忙，请稍后重试", headers={"Retry-After": "5"}
-        )
     history = [{"role": m.role, "content": m.content} for m in req.history]
 
     async def event_stream():
+        # 信号量在生成器内获取/释放（纳入下方 try/finally）：客户端在 StreamingResponse
+        # 开始迭代前断开时生成器根本不会启动，此时既未获取 sem 也未计数，无泄漏。
+        # 计数器增量与所有 yield 都落在 try 内，断连引发的 GeneratorExit 会先走 finally
+        # 归零计数器并释放 sem，再向上传播 —— 修复原先队列 yield 在 try 外导致的泄漏。
+        global _query_in_flight
+        if not await _try_acquire(sem):
+            yield f"data: {json.dumps({'type': 'error', 'content': '服务繁忙，请稍后重试'}, ensure_ascii=False)}\n\n"
+            return
+        # B4：排队可见化 —— 跟踪 in-flight 计数，告知前方还有多少请求
+        _query_in_flight += 1
+        ahead = _query_in_flight - 1
         try:
-            async for evt in ask_stream(
-                req.question, book=req.book, mode=req.mode, history=history
+            if ahead > 0:
+                yield f"data: {json.dumps({'type': 'queue', 'ahead': ahead}, ensure_ascii=False)}\n\n"
+            async for evt in _with_heartbeat(
+                ask_stream(
+                    req.question, book=req.book, mode=req.mode, history=history,
+                    decompose=req.decompose,
+                ),
+                interval=settings.stream_heartbeat_interval,
             ):
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -303,6 +381,7 @@ async def chat_endpoint(req: ChatRequest):
             logger.exception("chat 流式异常: %r", e)
             yield f"data: {json.dumps({'type': 'error', 'content': '答复服务暂不可用'}, ensure_ascii=False)}\n\n"
         finally:
+            _query_in_flight -= 1
             _release(sem)
 
     return StreamingResponse(

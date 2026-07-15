@@ -554,6 +554,10 @@ async function askQuestion() {
           answer += evt.content;
           els.content.textContent = answer;
           chatLog.scrollTop = chatLog.scrollHeight;
+        } else if (evt.type === "queue") {
+          if (!answer) els.content.textContent = `⏳ 排队中，前方还有 ${evt.ahead} 个请求…`;
+        } else if (evt.type === "ping") {
+          /* SSE 心跳，忽略 */
         } else if (evt.type === "refuse") {
           els.content.textContent = "⚠️ " + evt.content; return;
         } else if (evt.type === "error") {

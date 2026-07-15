@@ -153,6 +153,14 @@ class Settings:
     stream_first_token_timeout: float = field(
         default_factory=lambda: float(os.getenv("STREAM_FIRST_TOKEN_TIMEOUT", "60"))
     )
+    # SSE 心跳间隔（秒，A4）。
+    stream_heartbeat_interval: float = field(
+        default_factory=lambda: float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "15"))
+    )
+    # CORS 允许的来源（A4，逗号分隔；* 为全部；空则不启用 CORS）。
+    cors_origins: str = field(
+        default_factory=lambda: os.getenv("CORS_ORIGINS", "")
+    )
 
     # --- 输入校验（A0）---
     max_question_length: int = field(
