@@ -191,20 +191,36 @@ def _enforce_response_language() -> None:
 
     LightRAG 默认模板写 "The response MUST be in the same language as the user query."
     —— 英文书 + 英文提问 → Qwen 用英文答复，但因模型中英双语常混杂中文，造成中英混杂。
-    改为强制目标语言（默认简体中文），与问题/上下文语言无关。幂等：已替换则跳过。
+    改为强制目标语言（默认简体中文），与问题/上下文语言无关。
+
+    两处加固（小模型遵从性弱，单点指令常被忽略）：
+    1. 替换原"跟随问题语言"行为目标语言的强指令；
+    2. 模板末尾追加一条强制提醒（recency bias：模型对结尾指令更敏感）。
+    幂等：已替换则跳过。
     """
     from lightrag.prompt import PROMPTS
 
-    label = _RESPONSE_LANG_LABELS.get(settings.language.lower(), settings.language)
-    old = "The response MUST be in the same language as the user query."
-    new = (
-        f"The response MUST be written in {label}, regardless of the language "
-        f"of the user query or the context. Do not mix languages."
+    lang_key = settings.language.lower()
+    label = _RESPONSE_LANG_LABELS.get(lang_key, settings.language)
+    directives = {
+        "chinese": "必须全部使用简体中文回复，无论用户问题或上下文是何种语言；严禁中英混杂（专有名词可保留原文）。",
+        "english": "You MUST respond entirely in English, regardless of the language of the user query or context; do not mix languages.",
+    }
+    directive = directives.get(
+        lang_key, f"The response MUST be written in {label}; do not mix languages."
     )
+
     p = PROMPTS.get("rag_response", "")
+    old = "The response MUST be in the same language as the user query."
+    new = f"The response MUST be written in {label}. {directive}"
     if old in p:
-        PROMPTS["rag_response"] = p.replace(old, new)
-        logger.info("rag_response 语言指令已覆盖为: %s", label)
+        p = p.replace(old, new)
+    # 末尾强制提醒
+    marker = "【强制输出语言】"
+    if marker not in p:
+        p = p + f"\n\n{marker}{directive}"
+    PROMPTS["rag_response"] = p
+    logger.info("rag_response 语言指令已覆盖为: %s", label)
 
 
 def _build_rag(workspace: str = ""):
