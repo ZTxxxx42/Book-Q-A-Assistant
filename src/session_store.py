@@ -59,6 +59,7 @@ def _read_index() -> list[dict]:
 
 def _write_index(index: list[dict]) -> None:
     """原子写索引：先写临时文件再 replace，避免并发/中断产生半截文件。"""
+    _ensure_dir()
     p = _index_path()
     tmp = p.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
@@ -67,11 +68,17 @@ def _write_index(index: list[dict]) -> None:
 
 
 def _write_session(session: dict) -> None:
+    _ensure_dir()
     p = _session_path(session["id"])
     tmp = p.with_suffix(".json.tmp")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(session, f, ensure_ascii=False, indent=2)
     tmp.replace(p)
+
+
+def _ensure_dir() -> None:
+    """防御性确保会话目录存在（即使启动时未调 ensure_dirs 也能写）。"""
+    settings.session_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _summary(session: dict) -> dict:

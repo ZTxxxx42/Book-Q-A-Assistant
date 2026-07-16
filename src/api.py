@@ -199,6 +199,9 @@ def _safe_detail(prefix: str, e: Exception) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 启动即确保所有工作目录存在（working_dir / data/books / log_dir / session_dir）。
+    # 否则裸 uvicorn 启动时 session_dir 未创建，首个 POST /sessions 会 500。
+    settings.ensure_dirs()
     # B1：全局并发闸 —— 让 LightRAG 的 max_async 跨实例真正生效（零改源码）
     try:
         from lightrag.kg.shared_storage import initialize_share_data
