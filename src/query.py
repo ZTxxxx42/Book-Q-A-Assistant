@@ -146,7 +146,12 @@ async def _prepare_question(
       "是否有相关 chunk"的判据，故探测用分解前的改写查询。
     - ``retrieve_q``：最终送 ``aquery_llm`` 的查询（含分解拼串），让生成阶段检索
       覆盖多个子方面。
+
+    ``settings.enable_query_rewrite=False`` 时整体跳过（改写与分解都不调 GLM），
+    直接返回 ``(question, question)`` —— ``_pick_gen_query`` 见两者相等只探测一次。
     """
+    if not settings.enable_query_rewrite:
+        return question, question
     q = question
     if history:
         q = await _rewrite_query(q, history)

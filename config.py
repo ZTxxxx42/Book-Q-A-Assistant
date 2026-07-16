@@ -75,6 +75,10 @@ class Settings:
     llm_streaming: bool = field(default_factory=lambda: _cfg("LLM_STREAMING", "llm_streaming", True, bool))
     # GLM 并发：保守 2 避免 429（上一轮 4 并发触发限流）。
     llm_model_max_async: int = field(default_factory=lambda: _cfg("LLM_MODEL_MAX_ASYNC", "llm_model_max_async", 2, int))
+    # 429 速率限制重试次数（退避 2-60s；过多会拖长失败时间）。
+    llm_rate_limit_retries: int = field(default_factory=lambda: _cfg("LLM_RATE_LIMIT_RETRIES", "llm_rate_limit_retries", 4, int))
+    # 连接/超时错误重试次数。
+    llm_connection_retries: int = field(default_factory=lambda: _cfg("LLM_CONNECTION_RETRIES", "llm_connection_retries", 3, int))
 
     # --- Query LLM：最终答复生成（本地 Ollama Qwen，OpenAI 兼容）---
     # 仅 query 角色用；短答复生成，不持续满载故不会拖崩笔记本 GPU。
@@ -138,6 +142,9 @@ class Settings:
     hard_refuse_answer: str = field(
         default_factory=lambda: _cfg("HARD_REFUSE_ANSWER", "hard_refuse_answer", "知识库中未找到足够信息回答此问题。")
     )
+    # A3 查询改写/分解总开关：False 时跳过 GLM 改写（指代消解）与分解（拆子问题），
+    # 直接用原 question 检索。慢路径排查时可临时关闭以加速首响应。
+    enable_query_rewrite: bool = field(default_factory=lambda: _cfg("ENABLE_QUERY_REWRITE", "enable_query_rewrite", False, bool))
 
     # --- LLM 调用鲁棒性（A2）+ SSE/CORS（A4）---
     # GLM（抽取/关键词）单次请求超时（秒）。
