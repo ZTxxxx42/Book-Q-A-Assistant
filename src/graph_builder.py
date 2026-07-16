@@ -176,6 +176,37 @@ def _make_qwen_func():
     )
 
 
+# 答复语言标签映射（settings.language → 模板指令中的语言名）
+_RESPONSE_LANG_LABELS = {
+    "chinese": "简体中文",
+    "english": "English",
+    "japanese": "日本語",
+    "french": "Français",
+    "german": "Deutsch",
+}
+
+
+def _enforce_response_language() -> None:
+    """覆盖 LightRAG ``rag_response`` 模板的"跟随问题语言"指令，强制用 ``settings.language`` 回答。
+
+    LightRAG 默认模板写 "The response MUST be in the same language as the user query."
+    —— 英文书 + 英文提问 → Qwen 用英文答复，但因模型中英双语常混杂中文，造成中英混杂。
+    改为强制目标语言（默认简体中文），与问题/上下文语言无关。幂等：已替换则跳过。
+    """
+    from lightrag.prompt import PROMPTS
+
+    label = _RESPONSE_LANG_LABELS.get(settings.language.lower(), settings.language)
+    old = "The response MUST be in the same language as the user query."
+    new = (
+        f"The response MUST be written in {label}, regardless of the language "
+        f"of the user query or the context. Do not mix languages."
+    )
+    p = PROMPTS.get("rag_response", "")
+    if old in p:
+        PROMPTS["rag_response"] = p.replace(old, new)
+        logger.info("rag_response 语言指令已覆盖为: %s", label)
+
+
 def _build_rag(workspace: str = ""):
     """构造已配置 Qdrant + Neo4j + SiliconFlow embed/rerank + 双 LLM 的 LightRAG 实例。
 
@@ -186,6 +217,8 @@ def _build_rag(workspace: str = ""):
     import os
 
     from lightrag.llm_roles import RoleLLMConfig
+
+    _enforce_response_language()
 
     # LightRAG 后端从环境变量读取连接信息
     os.environ.setdefault("NEO4J_URI", settings.neo4j_uri)
