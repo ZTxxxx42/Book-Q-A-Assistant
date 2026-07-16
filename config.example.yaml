@@ -76,3 +76,7 @@ max_concurrent_requests: 8
 max_concurrent_ingest: 1
 query_overall_timeout: 180
 task_ttl: 3600
+
+# 会话存储
+session_dir: sessions
+session_title_length: 30

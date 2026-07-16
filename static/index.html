@@ -105,6 +105,8 @@
     background: var(--bg); color: var(--text); border: 1px solid var(--border);
     border-radius: 6px; padding: 7px 11px; font-size: 13px; outline: none;
   }
+  #session-bar { display: flex; gap: 8px; align-items: center; }
+  #session-bar select { flex: 1; }
 
   #toast {
     position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px;
@@ -195,6 +197,11 @@
   </main>
 
   <div id="query-box">
+    <div id="session-bar">
+      <button class="sm" id="s-new">＋ 新会话</button>
+      <select id="s-select" title="历史会话"><option value="">（无）</option></select>
+      <button class="sm secondary" id="s-del">🗑 删除</button>
+    </div>
     <div id="chat-log"></div>
     <div class="chat-input-row">
       <select id="q-mode">
@@ -517,6 +524,97 @@ async function runCypher() {
 // ---------- 多轮问答 ----------
 let chatHistory = [];
 const chatLog = document.getElementById("chat-log");
+// 会话管理：localStorage 持久 user_id + 当前会话 id
+const userId = localStorage.getItem("bk_user_id") || (crypto.randomUUID && crypto.randomUUID()) || String(Date.now() + Math.random());
+localStorage.setItem("bk_user_id", userId);
+let currentSessionId = null;
+const sSelect = document.getElementById("s-select");
+
+// 渲染单条消息（可附带 refs）
+function renderMsg(role, content, refs) {
+  const els = addMsg(role, content);
+  if (refs && refs.length) {
+    els.refs.style.display = "block";
+    els.refs.innerHTML = "📎 出处：" + refs.map(r => r.file_path).filter((v,i,a)=>a.indexOf(v)===i).join(", ");
+  }
+  return els;
+}
+
+// 加载会话列表到下拉
+async function loadSessions() {
+  try {
+    const r = await fetch(API + `/sessions?user_id=${encodeURIComponent(userId)}`);
+    if (!r.ok) { toast("加载会话列表失败", "error"); return; }
+    const list = await r.json();
+    sSelect.innerHTML = '<option value="">（无）</option>' + list.map(s =>
+      `<option value="${s.id}">${escapeHtml(s.title || s.book || s.id.slice(0,8))} · ${escapeHtml(s.book)}</option>`
+    ).join("");
+    if (currentSessionId) sSelect.value = currentSessionId;
+  } catch (e) { toast("加载会话列表失败：" + e, "error"); }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+// 新建会话
+async function newSession() {
+  const book = currentBookOrWarn(); if (!book) return false;
+  const mode = document.getElementById("q-mode").value;
+  try {
+    const r = await fetch(API + "/sessions", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ user_id: userId, book, mode })
+    });
+    if (!r.ok) { toast("新建会话失败", "error"); return false; }
+    const s = await r.json();
+    currentSessionId = s.id;
+    chatHistory = []; chatLog.innerHTML = "";
+    await loadSessions();
+    sSelect.value = currentSessionId;
+    return true;
+  } catch (e) { toast("新建会话失败：" + e, "error"); return false; }
+}
+
+// 选择历史会话：加载消息并渲染
+async function selectSession(id) {
+  if (!id) { currentSessionId = null; chatHistory = []; chatLog.innerHTML = ""; return; }
+  try {
+    const r = await fetch(API + `/sessions/${encodeURIComponent(id)}?user_id=${encodeURIComponent(userId)}`);
+    if (!r.ok) { if (r.status === 404) toast("会话不存在或已删除", "error"); return; }
+    const s = await r.json();
+    currentSessionId = s.id;
+    chatLog.innerHTML = "";
+    chatHistory = [];
+    // 切到该会话的书
+    if (s.book && s.book !== currentBook) {
+      const sel = document.getElementById("book-select");
+      if ([...sel.options].some(o => o.value === s.book)) { sel.value = s.book; onBookChange(); }
+    }
+    document.getElementById("q-mode").value = s.mode || "hybrid";
+    for (const m of (s.messages || [])) {
+      renderMsg(m.role, m.content, m.refs);
+      // 重建内存历史用于多轮上下文回传
+      chatHistory.push({ role: m.role, content: m.content });
+    }
+    if (chatHistory.length > 12) chatHistory = chatHistory.slice(-12);
+  } catch (e) { toast("加载会话失败：" + e, "error"); }
+}
+
+// 删除当前会话
+async function deleteSession() {
+  if (!currentSessionId) { toast("当前无会话可删除", "error"); return; }
+  if (!confirm("确认删除当前会话？")) return;
+  try {
+    const r = await fetch(API + `/sessions/${encodeURIComponent(currentSessionId)}?user_id=${encodeURIComponent(userId)}`, { method: "DELETE" });
+    if (r.status === 204) {
+      toast("会话已删除", "ok");
+      currentSessionId = null; chatHistory = []; chatLog.innerHTML = "";
+      await loadSessions();
+    } else if (r.status === 404) { toast("会话不存在", "error"); await loadSessions(); }
+    else { toast("删除失败", "error"); }
+  } catch (e) { toast("删除失败：" + e, "error"); }
+}
 
 function addMsg(role, content) {
   const div = document.createElement("div");
@@ -533,6 +631,8 @@ async function askQuestion() {
   if (!q) return;
   const mode = document.getElementById("q-mode").value;
   const book = currentBookOrWarn(); if (!book) return;
+  // 无当前会话则自动新建一个
+  if (!currentSessionId) { if (!(await newSession())) return; }
   document.getElementById("q-input").value = "";
 
   addMsg("user", q);
@@ -542,7 +642,7 @@ async function askQuestion() {
   try {
     const resp = await fetch(API + "/chat", {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ question: q, mode, history: chatHistory, book })
+      body: JSON.stringify({ question: q, mode, history: chatHistory, book, session_id: currentSessionId, user_id: userId })
     });
     if (!resp.ok) { els.content.textContent = "请求失败：" + resp.status; return; }
 
@@ -584,6 +684,8 @@ async function askQuestion() {
       chatHistory.push({ role: "user", content: q });
       chatHistory.push({ role: "assistant", content: answer });
       if (chatHistory.length > 12) chatHistory = chatHistory.slice(-12);
+      // 后端已持久化，刷新下拉标题
+      loadSessions();
     }
   } catch (e) { els.content.textContent = "查询失败：" + e; }
 }
@@ -601,6 +703,9 @@ document.getElementById("reset-btn").onclick = () => { chart.clear(); disabledLa
 document.getElementById("q-btn").onclick = askQuestion;
 document.getElementById("q-clear").onclick = () => { chatHistory = []; chatLog.innerHTML = ""; };
 document.getElementById("q-input").addEventListener("keydown", e => { if (e.key === "Enter") askQuestion(); });
+document.getElementById("s-new").onclick = newSession;
+document.getElementById("s-del").onclick = deleteSession;
+sSelect.onchange = () => selectSession(sSelect.value);
 document.getElementById("doc-ingest").onclick = () => ingestFile(false);
 document.getElementById("doc-upsert").onclick = () => ingestFile(true);
 document.getElementById("cypher-run").onclick = runCypher;
@@ -700,6 +805,8 @@ window.addEventListener("resize", () => chart.resize());
 
 // 初始化：拉文档列表 → 填充书籍选择器 → 自动选第一本并加载其图谱
 loadDocs();
+// 加载该用户的历史会话列表
+loadSessions();
 </script>
 </body>
 </html>

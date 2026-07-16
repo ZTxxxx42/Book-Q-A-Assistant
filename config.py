@@ -180,10 +180,19 @@ class Settings:
     # 完成任务保留时长（秒，TTL 清理）。
     task_ttl: float = field(default_factory=lambda: _cfg("TASK_TTL", "task_ttl", 3600, float))
 
+    # --- 会话存储 ---
+    # 会话 JSON 文件目录（跨书的全局用户数据，独立于按书隔离的 working_dir KV）。
+    session_dir: Path = field(
+        default_factory=lambda: PROJECT_ROOT / _cfg("SESSION_DIR", "session_dir", "sessions")
+    )
+    # 会话标题取首条问题的前 N 字。
+    session_title_length: int = field(default_factory=lambda: _cfg("SESSION_TITLE_LENGTH", "session_title_length", 30, int))
+
     def ensure_dirs(self) -> None:
         self.working_dir.mkdir(parents=True, exist_ok=True)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.session_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
@@ -216,6 +225,7 @@ CONFIG_GROUPS: list[tuple[str, list[str]]] = [
     ("日志", ["log_level", "log_dir"]),
     ("输入校验（A0）", ["max_question_length", "max_book_name_length", "max_history_turns"]),
     ("并发硬化（B0/B1/B2）", ["rag_pool_size", "global_extract_concurrency", "global_keyword_concurrency", "global_query_concurrency", "global_embedding_concurrency", "global_rerank_concurrency", "max_concurrent_requests", "max_concurrent_ingest", "query_overall_timeout", "task_ttl"]),
+    ("会话存储", ["session_dir", "session_title_length"]),
 ]
 
 # 字段名 → 类型 cast（按当前 settings 值推断；bool 必须在 int 前判断）。

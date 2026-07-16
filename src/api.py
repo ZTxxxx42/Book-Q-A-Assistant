@@ -33,6 +33,7 @@ from src.maintenance import (
 )
 from src.query import ask, ask_stream, cypher_query, graph_stats
 from src.rag_pool import get_pool, shutdown_pool
+from src import session_store
 
 logger = logging.getLogger("book_kg.api")
 logging.basicConfig(level=logging.INFO)
@@ -334,6 +335,23 @@ class ChatRequest(BaseModel):
     )
     book: str = Field(..., description="书籍文件名（= workspace，仅检索该书图谱）")
     decompose: bool = Field(False, description="A3：用 GLM 拆子问题扩展查询（默认关）")
+    # 会话归属：提供 session_id + user_id 时，本次问答自动持久化到该会话。
+    session_id: str | None = Field(None, description="归属会话 ID；提供则持久化本次问答")
+    user_id: str | None = Field(None, description="用户标识（session_id 非空时必填）")
+
+    @field_validator("book")
+    @classmethod
+    def _check_book(cls, v: str) -> str:
+        return _validate_book(v)
+
+
+# ---------- 会话管理 ----------
+
+class SessionCreateRequest(BaseModel):
+    user_id: str = Field(..., min_length=1, max_length=64, description="用户标识")
+    book: str = Field(..., description="书籍文件名（= workspace）")
+    mode: QueryMode = Field("hybrid")
+    title: str | None = Field(None, max_length=200, description="会话标题；省略则取首条问题前缀")
 
     @field_validator("book")
     @classmethod
@@ -352,6 +370,13 @@ async def chat_endpoint(req: ChatRequest):
     _ensure_book_exists(req.book)
     sem = _query_sem()
     history = [{"role": m.role, "content": m.content} for m in req.history]
+    # 会话持久化：仅当 session_id + user_id 同时提供才启用
+    persist = bool(req.session_id and req.user_id)
+    if persist:
+        logger.info(
+            "chat start: session=%s user=%s book=%s mode=%s",
+            req.session_id, req.user_id, req.book, req.mode,
+        )
 
     async def event_stream():
         # 信号量在生成器内获取/释放（纳入下方 try/finally）：客户端在 StreamingResponse
@@ -365,6 +390,17 @@ async def chat_endpoint(req: ChatRequest):
         # B4：排队可见化 —— 跟踪 in-flight 计数，告知前方还有多少请求
         _query_in_flight += 1
         ahead = _query_in_flight - 1
+        # 累积答复与引用，供会话持久化
+        answer = ""
+        refs: list = []
+        # 先持久化 user 消息（即使后续失败也保留提问痕迹，便于管理员排查）
+        if persist:
+            try:
+                await session_store.append_message(
+                    req.session_id, req.user_id, "user", req.question,
+                )
+            except Exception:
+                logger.exception("persist user message failed: session=%s", req.session_id)
         try:
             if ahead > 0:
                 yield f"data: {json.dumps({'type': 'queue', 'ahead': ahead}, ensure_ascii=False)}\n\n"
@@ -375,8 +411,24 @@ async def chat_endpoint(req: ChatRequest):
                 ),
                 interval=settings.stream_heartbeat_interval,
             ):
+                # 累积 references / token 以便持久化 assistant 消息
+                if evt.get("type") == "references":
+                    refs = evt.get("content", []) or []
+                elif evt.get("type") == "token":
+                    answer += evt.get("content", "")
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            if persist and answer:
+                try:
+                    await session_store.append_message(
+                        req.session_id, req.user_id, "assistant", answer, refs=refs,
+                    )
+                    logger.info(
+                        "chat done: session=%s user=%s answer_chars=%d",
+                        req.session_id, req.user_id, len(answer),
+                    )
+                except Exception:
+                    logger.exception("persist assistant message failed: session=%s", req.session_id)
         except Exception as e:
             logger.exception("chat 流式异常: %r", e)
             yield f"data: {json.dumps({'type': 'error', 'content': '答复服务暂不可用'}, ensure_ascii=False)}\n\n"
@@ -389,6 +441,58 @@ async def chat_endpoint(req: ChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------- 会话管理路由 ----------
+
+@app.post("/sessions", status_code=201)
+async def create_session_endpoint(req: SessionCreateRequest) -> dict:
+    """创建新的聊天会话。``user_id`` 标识归属（前端 localStorage 持久 UUID）。"""
+    try:
+        session = await session_store.create_session(
+            user_id=req.user_id, book=req.book, mode=req.mode, title=req.title,
+        )
+        return session
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_detail("创建会话失败", e))
+
+
+@app.get("/sessions")
+async def list_sessions_endpoint(user_id: str) -> list[dict]:
+    """列出某用户的会话（索引项，不含消息），按 updated_at 降序。"""
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id 必填")
+    try:
+        return await session_store.list_sessions(user_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_detail("查询会话列表失败", e))
+
+
+@app.get("/sessions/{session_id}")
+async def get_session_endpoint(session_id: str, user_id: str) -> dict:
+    """取单会话完整内容（含消息）。不存在或越权返回 404。"""
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id 必填")
+    try:
+        session = await session_store.get_session(session_id, user_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_detail("查询会话失败", e))
+    if session is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return session
+
+
+@app.delete("/sessions/{session_id}", status_code=204)
+async def delete_session_endpoint(session_id: str, user_id: str):
+    """删除会话。不存在或越权返回 404。"""
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id 必填")
+    try:
+        ok = await session_store.delete_session(session_id, user_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=_safe_detail("删除会话失败", e))
+    if not ok:
+        raise HTTPException(status_code=404, detail="会话不存在")
 
 
 @app.post("/ingest", response_model=IngestResponse)
