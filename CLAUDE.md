@@ -38,7 +38,11 @@ D:/miniforge/envs/my_env/python.exe scripts/check_model.py           # 验证 .e
 D:/miniforge/envs/my_env/python.exe scripts/e2e_test.py              # 导入 alice_en.txt（max 15 chunks）+ 流式查询
 ```
 
-**没有 pytest 套件** —— 验证靠冒烟脚本 + 直连运行中的 API：
+**pytest 套件**（会话管理 + 纯逻辑层，不依赖外部服务）：
+```bash
+D:/miniforge/envs/my_env/python.exe -m pytest -q          # tests/ 下全部用例
+```
+依赖：`pip install -r requirements-dev.txt`（pytest + pytest-asyncio）。`asyncio_mode=auto`（见 `pytest.ini`）。`tests/test_session_routes.py` 用 `TestClient(app)` 且不进入 lifespan，故无需 Neo4j/Qdrant/Ollama。端到端（触图/LLM）仍靠冒烟脚本 + 直连运行中的 API：
 ```bash
 curl http://localhost:8010/health
 curl -N -X POST http://localhost:8010/chat -H "Content-Type: application/json" \
