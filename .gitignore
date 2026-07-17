@@ -17,3 +17,6 @@ data/books/*
 sessions/
 chat_*.txt
 *_sid.txt
+
+# 临时导出目录（Release 附件打包产物）
+release-assets/
