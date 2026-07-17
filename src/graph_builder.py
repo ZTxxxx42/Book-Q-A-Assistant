@@ -27,6 +27,8 @@ def _make_llm_func(
     streaming_enabled: bool,
     timeout: float = 60.0,
     first_token_timeout: float = 60.0,
+    rate_limit_retries: int = 4,
+    connection_retries: int = 3,
 ):
     """构造通用 LightRAG LLM callable（OpenAI 兼容端点）。
 
@@ -60,12 +62,12 @@ def _make_llm_func(
     )
 
     def _stop_by_type(retry_state):
-        """429 重试 6 次，连接/超时错误重试 3 次。"""
+        """429 重试 rate_limit_retries 次，连接/超时错误重试 connection_retries 次。"""
         exc = retry_state.outcome.exception()
         n = retry_state.attempt_number
         if isinstance(exc, RateLimitError):
-            return n >= 6
-        return n >= 3
+            return n >= rate_limit_retries
+        return n >= connection_retries
 
     @retry(
         retry=retry_if_exception_type(
@@ -161,6 +163,8 @@ def _make_glm_func():
         streaming_enabled=settings.llm_streaming,
         timeout=settings.llm_timeout,
         first_token_timeout=settings.stream_first_token_timeout,
+        rate_limit_retries=settings.llm_rate_limit_retries,
+        connection_retries=settings.llm_connection_retries,
     )
 
 
@@ -173,6 +177,8 @@ def _make_qwen_func():
         streaming_enabled=settings.query_llm_streaming,
         timeout=settings.query_llm_timeout,
         first_token_timeout=settings.stream_first_token_timeout,
+        rate_limit_retries=settings.llm_rate_limit_retries,
+        connection_retries=settings.llm_connection_retries,
     )
 
 

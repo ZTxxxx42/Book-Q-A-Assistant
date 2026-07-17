@@ -12,3 +12,8 @@ data/books/*
 *.db
 *.log
 .idea/
+
+# 运行时产物：会话持久化与调试输出
+sessions/
+chat_*.txt
+*_sid.txt
