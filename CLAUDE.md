@@ -16,11 +16,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # 前置：Ollama 运行中 + 已 pull Qwen，Neo4j + Qdrant 已起
+# 容器路径（推荐，GPU 直通 + 自动拉 Qwen）：
+docker compose up -d               # Neo4j + Qdrant + Ollama（ollama-pull 自动拉 qwen2.5:7b-instruct）+ app
+# —— 以下为裸机路径（不用容器 Ollama 时）——
 ollama pull qwen2.5:7b-instruct
 # Ollama 默认端口 11434 落在 Windows 保留端口段 → 改用 21434
 $env:OLLAMA_HOST="127.0.0.1:21434"   # PowerShell
 ollama serve                       # 保持运行（OpenAI API 在 http://localhost:21434/v1）
-docker compose up -d               # Neo4j + Qdrant
+docker compose up -d neo4j qdrant  # 仅起 Neo4j + Qdrant（裸机 Ollama 不入容器）
 
 # FastAPI 服务（端口 8010，不是 8000 —— 8000 在本机被"幽灵占用"）
 D:/miniforge/envs/my_env/python.exe -m uvicorn src.api:app --port 8010 --host 127.0.0.1

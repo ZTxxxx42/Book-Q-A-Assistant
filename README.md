@@ -45,49 +45,63 @@ book_knowledge_graph/
 
 ## 快速开始
 
-### 1. 安装依赖
+> 完整部署细节见 [`docs/LOCAL_LLM_SETUP.md`](docs/LOCAL_LLM_SETUP.md)。LLM 按角色拆分：**实体/关键词抽取 → 远程 GLM-4.7**；**最终答复生成 → 本地 Ollama Qwen2.5-7B-Instruct（需 NVIDIA GPU）**。embedding/rerank 走 SiliconFlow API。
+
+### 0. 前置要求
+
+- **NVIDIA GPU + [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)**：Ollama Qwen 答复模型走容器内 GPU 直通。无 GPU 无法即拉即用（CPU 退化为极慢）。
+- **Docker**（用于 Neo4j + Qdrant + Ollama）。
+- **Python 解释器**：推荐 miniforge 环境（`D:/miniforge/envs/my_env/python.exe`），含项目所需的 pinned 依赖；也可用自带 venv。
+
+### 1. 配置环境变量
 
 ```bash
-cd book_knowledge_graph
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS/Linux
-pip install -r requirements.txt
+cp .env.example .env
+# 填入：LLM_API_KEY（智谱 GLM）、EMBEDDING_API_KEY / RERANK_API_KEY（SiliconFlow）
+# QUERY_LLM_* 默认指向本地 Ollama，无需 key
 ```
 
-### 2. 启动 Neo4j
+### 2. 安装依赖
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-dev.txt   # 可选：pytest
+```
+
+### 3. 启动 Neo4j + Qdrant + Ollama（含自动拉取 Qwen 模型）
 
 ```bash
 docker compose up -d
 ```
 
-浏览器访问 http://localhost:7474 ，用 `neo4j / bookgraph123` 登录查看图谱。
+首次启动时 `ollama-pull` 服务会自动拉取 `qwen2.5:7b-instruct`（~4.7GB，幂等，已存在则秒过）；`app` 服务在模型拉取完成后才启动。Ollama API 在 http://localhost:21434/v1 。
 
-### 3. 配置环境变量
+> Neo4j Browser：http://localhost:7474 ，用 `neo4j / bookgraph123` 登录。
+> Qdrant Dashboard：http://localhost:16333/dashboard 。
+
+### 4. 冒烟验证（5 项全过才继续）
 
 ```bash
-cp .env.example .env
-# 编辑 .env 填入 LLM API Key
+python scripts/smoke_remote_models.py   # SiliconFlow embed/rerank + Qdrant + GLM + Qwen + LightRAG init
+# 单独验证某个 LLM 端点：
+python scripts/check_model.py                 # 默认验证 GLM 抽取
+python scripts/check_model.py --role query    # 验证本地 Qwen 答复
 ```
 
-### 4. 导入一本书
+### 5. 启动 API
+
+```bash
+python -m uvicorn src.api:app --port 8010 --host 127.0.0.1
+curl http://localhost:8010/health
+```
+
+### 6. 导入一本书并提问
 
 ```bash
 python main.py ingest --file data/books/your_book.pdf
 # 也支持 .txt / .md / .epub
-```
-
-### 5. 提问
-
-```bash
-python main.py query --question "书中的主角与谁有关系？"
-python main.py query --question "这本书的核心论点是什么" --mode hybrid
-```
-
-### 6. 查看统计
-
-```bash
-python main.py stats
+python main.py query --question "书中的主角与谁有关系？" --mode hybrid --book your_book.pdf
+python main.py stats --book your_book.pdf
 ```
 
 ## 查询模式说明
@@ -118,5 +132,7 @@ ORDER BY deg DESC LIMIT 10;
 ## 注意事项
 
 - 长书导入耗时较长（取决于 LLM 调用次数），可先用 `--max-chunks` 限制块数测试。
-- LightRAG 的实体类型标注依赖 LLM 提示，建议用能力较强的模型（如 `gpt-4o-mini` 或 Claude Sonnet）。
-- 重新导入前清空 `working_dir` 与 Neo4j 中的数据，避免重复实体。
+- 实体抽取走远程 GLM-4.7；**不要**把抽取角色路由到本地 Qwen——长抽取生成会拖崩笔记本 GPU（见 `docs/TROUBLESHOOTING.md`）。
+- 重新导入同一本书用 `POST /documents/upsert` 或 `POST /documents/{book}/refresh`（先删该 workspace 再重导），不要手动清 `working_dir`。
+- 每本书是独立知识图谱（LightRAG `workspace` = 书名 basename），不做跨书合并或跨书查询。
+- Windows 端口坑：Ollama 用 `21434`（默认 11434 落在 Hyper-V 保留段）、Qdrant 用 `16333`（默认 6333 同因），均已在 compose 与 `.env.example` 对齐。
